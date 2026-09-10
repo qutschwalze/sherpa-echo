@@ -347,6 +347,7 @@ class PySessionVoiceBank:
 
     def enroll(self, gid, samples_f32, dur_ms, allow_quick=True):
         if dur_ms < int(self.min_enroll_sec * 1000):
+            log.info("VB enroll skip global=%s: nur %sms (< %ss)", gid, dur_ms, self.min_enroll_sec)
             return False
         if len(samples_f32) == 0:
             return False
@@ -509,13 +510,27 @@ async def ws_endpoint(ws: WebSocket):
                 max_gid = max([g["speaker"] for g in global_segments], default=-1)
                 fresh = max_gid + 1
                 final_map = dict(mapping)
-                # alle lokalen IDs, längster Block je ID
+                # alle lokalen IDs: Gesamt-Redezeit + konkatenierte Samples je ID
+                # (Fix Step 3b: vorher nur längster Block -> kurze Turn-Takings <2s
+                #  konnten nie enrollen, Bank blieb bei 1)
                 for lid in sorted({s["speaker"] for s in abs_local}):
-                    cand = [s for s in abs_local if s["speaker"] == lid]
+                    cand = sorted([s for s in abs_local if s["speaker"] == lid], key=lambda s: s["start"])
                     best = max(cand, key=lambda s: s["end"] - s["start"])
-                    dur_ms = int((best["end"] - best["start"]) * 1000)
-                    samples = _slice_for(best["start"], best["end"], w0, snap_f32)
+                    total_dur_ms = int(sum(s["end"] - s["start"] for s in cand) * 1000)
+                    best_dur_ms = int((best["end"] - best["start"]) * 1000)
+                    # Samples aller Blöcke konkatenieren (max 8s für Embedding)
+                    import numpy as _np
+                    parts = []
+                    for s in cand:
+                        sl = _slice_for(s["start"], s["end"], w0, snap_f32)
+                        if len(sl) > 0:
+                            parts.append(sl)
+                            if sum(len(x) for x in parts) >= 8 * 16000:
+                                break
+                    samples = _np.concatenate(parts) if parts else []
+                    dur_ms = total_dur_ms
                     if len(samples) == 0:
+                        log.info("VB skip local=%s: keine Samples (Blöcke=%s)", lid, len(cand))
                         continue
                     # 1) Bank-Identify (bekannte Stimme -> mappen)
                     bank_hit = await loop.run_in_executor(_executor, voice_bank.identify, list(samples))
@@ -538,14 +553,14 @@ async def ws_endpoint(ws: WebSocket):
                     # vereinfacht: wenn Ziel nicht in Bank -> enroll (Phantom/Neu)
                     if not voice_bank.has(tgt):
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, tgt, list(samples), dur_ms, True)
-                        log.info("VB enroll global=%s ok=%s", tgt, ok)
+                        log.info("VB enroll global=%s ok=%s total_dur=%sms best=%sms blocks=%s", tgt, ok, dur_ms, best_dur_ms, len(cand))
                     else:
                         # Fehlzuordnung auf echte Bank-ID -> frische ID, kein Quick-Confirm
                         while voice_bank.has(fresh):
                             fresh += 1
                         final_map[lid] = fresh
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, False)
-                        log.info("VB fresh global=%s ok=%s (Fehlzuordnung von %s)", fresh, ok, tgt)
+                        log.info("VB fresh global=%s ok=%s total_dur=%sms blocks=%s (Fehlzuordnung von %s)", fresh, ok, dur_ms, len(cand), tgt)
                         fresh += 1
                         last_bank_end, last_bank_gid = best["end"], final_map[lid]
                         continue
