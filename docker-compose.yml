@@ -1,0 +1,20 @@
+services:
+  sherpa-server:
+    build: .
+    container_name: sherpa-server
+    restart: unless-stopped
+    ports:
+      - "8010:8001"  # LAN ws://172.16.120.218:8010/ws – FireOS ws:// umgeht kaputtes TLS
+    environment:
+      - SHERPA_MODEL=kroko-de
+      - SHERPA_NUM_THREADS=2
+    env_file:
+      - .env
+    volumes:
+      - ./models:/models:ro
+      - ./logs:/logs
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
