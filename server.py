@@ -525,16 +525,13 @@ async def ws_endpoint(ws: WebSocket):
                     best = max(cand, key=lambda s: s["end"] - s["start"])
                     total_dur_ms = int(sum(s["end"] - s["start"] for s in cand) * 1000)
                     best_dur_ms = int((best["end"] - best["start"]) * 1000)
-                    # Samples aller Blöcke konkatenieren (max 8s für Embedding)
-                    import numpy as _np
-                    parts = []
-                    for s in cand:
-                        sl = _slice_for(s["start"], s["end"], w0, snap_f32)
-                        if len(sl) > 0:
-                            parts.append(sl)
-                            if sum(len(x) for x in parts) >= 8 * 16000:
-                                break
-                    samples = _np.concatenate(parts) if parts else []
+                    # Embedding NUR aus längstem zusammenhängenden Block (max 8s):
+                    # Konkatenieren mischt zwei Stimmen in einen Vektor -> sim zu
+                    # allem hoch -> Drift-Schutz löscht jedes Pending (Todesspirale).
+                    # total_dur zählt weiter für die 2s/4s-Gates.
+                    samples = _slice_for(best["start"], best["end"], w0, snap_f32)
+                    if len(samples) > 8 * 16000:
+                        samples = samples[:8 * 16000]
                     dur_ms = total_dur_ms
                     if len(samples) == 0:
                         log.info("VB skip local=%s: keine Samples (Blöcke=%s)", lid, len(cand))
@@ -566,7 +563,7 @@ async def ws_endpoint(ws: WebSocket):
                         while voice_bank.has(fresh):
                             fresh += 1
                         final_map[lid] = fresh
-                        ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, False)
+                        ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, True)
                         log.info("VB fresh global=%s ok=%s total_dur=%sms blocks=%s (Fehlzuordnung von %s)", fresh, ok, dur_ms, len(cand), tgt)
                         fresh += 1
                         last_bank_end, last_bank_gid = best["end"], final_map[lid]
