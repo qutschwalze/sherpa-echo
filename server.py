@@ -143,7 +143,7 @@ def get_diarizer():
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(SEGMENTATION_MODEL)),
         ),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMBEDDING_MODEL)),
-        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.85),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.65),
         min_duration_on=0.6,
         min_duration_off=0.8,
     )
