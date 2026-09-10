@@ -246,6 +246,146 @@ def reconcile_chunk(local_segs, overlap_zone, prev_global):
     return mapped, mapping, zone_total
 
 
+_embed_extractor = None
+
+def get_embed_extractor():
+    global _embed_extractor
+    if _embed_extractor is not None:
+        return _embed_extractor
+    if not EMBEDDING_MODEL.exists():
+        log.warning("Embedding model missing: %s", EMBEDDING_MODEL)
+        return None
+    cfg = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMBEDDING_MODEL), num_threads=2)
+    if not cfg.validate():
+        log.error("Embedding config validate failed")
+        return None
+    _embed_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(cfg)
+    log.info("Embedding extractor ready")
+    return _embed_extractor
+
+def _cosine(a, b):
+    import math
+    if len(a) == 0 or len(a) != len(b):
+        return 0.0
+    dot = sum(x*y for x, y in zip(a, b))
+    na = sum(x*x for x in a)
+    nb = sum(x*x for x in b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+class PySessionVoiceBank:
+    # Port von SessionVoiceBank.kt: match 0.62, pending 0.35, minEnroll/Identify 2s, Quick-Confirm 4s
+    def __init__(self):
+        self.voiceprints = {}
+        self.counts = {}
+        self.pending = {}
+        self.match_thr = 0.62
+        self.pending_thr = 0.35
+        self.min_enroll_sec = 2.0
+        self.min_ident_sec = 2.0
+        self.quick_sec = 4.0
+
+    def _embed(self, samples_f32):
+        import numpy as np
+        if len(samples_f32) == 0:
+            return None
+        ex = get_embed_extractor()
+        if ex is None:
+            return None
+        try:
+            import numpy as _np
+            arr = _np.ascontiguousarray(_np.array(samples_f32, dtype=_np.float32))
+            st = ex.create_stream()
+            st.accept_waveform(sample_rate=16000, waveform=arr)
+            st.input_finished()
+            if not ex.is_ready(st):
+                return None
+            emb = ex.compute(st)
+            return list(emb)
+        except Exception:
+            log.exception("embed failed")
+            return None
+
+    def identify(self, samples_f32):
+        if len(samples_f32) < int(self.min_ident_sec * 16000):
+            return None
+        if not self.voiceprints and not self.pending:
+            return None
+        emb = self._embed(samples_f32)
+        if emb is None:
+            return None
+        best_id, best_sim, best_pending = None, 0.0, False
+        for gid, vp in self.voiceprints.items():
+            s = _cosine(emb, vp)
+            if s > best_sim:
+                best_sim, best_id, best_pending = s, gid, False
+        for gid, pe in self.pending.items():
+            s = _cosine(emb, pe)
+            if s > best_sim:
+                best_sim, best_id, best_pending = s, gid, True
+        thr = self.pending_thr if best_pending else self.match_thr
+        if best_id is not None and best_sim > thr:
+            if best_pending:
+                # Drift-Vorprüfung: gehört zu anderer bestehender Stimme?
+                for gid, vp in self.voiceprints.items():
+                    if gid != best_id and _cosine(emb, vp) >= self.pending_thr:
+                        del self.pending[best_id]
+                        log.info("VB_DRIFT_ABFANG pending=%s -> global=%s", best_id, gid)
+                        return gid
+                for gid, pe in list(self.pending.items()):
+                    if gid != best_id and _cosine(emb, pe) >= self.pending_thr:
+                        del self.pending[best_id]
+                        return gid
+                # confirm: Ø aus beiden Kontakten
+                old = self.pending.pop(best_id)
+                merged = [(a+b)/2 for a, b in zip(old, emb)]
+                self.voiceprints[best_id] = merged
+                self.counts[best_id] = 2
+            return best_id
+        return None
+
+    def enroll(self, gid, samples_f32, dur_ms, allow_quick=True):
+        if dur_ms < int(self.min_enroll_sec * 1000):
+            return False
+        if len(samples_f32) == 0:
+            return False
+        emb = self._embed(samples_f32)
+        if emb is None:
+            return False
+        if gid in self.voiceprints:
+            c = self.counts.get(gid, 1)
+            old = self.voiceprints[gid]
+            self.voiceprints[gid] = [(a*c+b)/(c+1) for a, b in zip(old, emb)]
+            self.counts[gid] = c+1
+            return True
+        if gid in self.pending:
+            old = self.pending[gid]
+            if _cosine(old, emb) >= self.pending_thr:
+                self.pending.pop(gid)
+                self.voiceprints[gid] = [(a+b)/2 for a, b in zip(old, emb)]
+                self.counts[gid] = 2
+                return True
+            self.pending[gid] = emb
+            return False
+        self.pending[gid] = emb
+        if allow_quick and dur_ms >= int(self.quick_sec*1000):
+            for oid, vp in self.voiceprints.items():
+                if oid != gid and _cosine(emb, vp) >= self.pending_thr:
+                    return False
+            for oid, pe in self.pending.items():
+                if oid != gid and _cosine(emb, pe) >= self.pending_thr:
+                    return False
+            old = self.pending.pop(gid)
+            self.voiceprints[gid] = old
+            self.counts[gid] = 1
+            return True
+        return False
+
+    def has(self, gid):
+        return gid in self.voiceprints or gid in self.pending
+
+
 def diarize_window_sync(window_int16: bytes):
     # Ein Chunk-Fenster (20s) diarizieren, Zeiten relativ->absolut macht der Caller
     d = get_diarizer()
@@ -334,21 +474,88 @@ async def ws_endpoint(ws: WebSocket):
     next_chunk_end_sec = CHUNK_SEC  # erster Chunk [0,15], danach [prevEnd-5, prevEnd+15]
     chunk_index = 0
     diar_task: asyncio.Task | None = None
+    voice_bank = PySessionVoiceBank()  # Phase 3 Step 3: session-only, RAM-only
+    last_bank_end = -1e9
+    last_bank_gid = None
+
+    def _window_samples(snap: bytes):
+        import numpy as np
+        return np.frombuffer(snap, dtype=np.int16).astype(np.float32) / 32768.0
+
+    def _slice_for(seg_start_abs, seg_end_abs, w0, snap_f32):
+        s0 = max(0, int((seg_start_abs - w0) * 16000))
+        s1 = min(len(snap_f32), int((seg_end_abs - w0) * 16000))
+        if s1 - s0 < int(0.5 * 16000):
+            return []
+        return snap_f32[s0:s1]
 
     async def _run_chunk(idx: int, w0: float, w1: float, snap: bytes):
-        # Hintergrund-Chunk: Fenster diarizieren, reconcilen, live senden
+        nonlocal last_bank_end, last_bank_gid
+        # Hintergrund-Chunk: Fenster diarizieren, reconcilen, Bank, live senden
         try:
             loop = asyncio.get_running_loop()
             local = await loop.run_in_executor(_executor, diarize_window_sync, snap)
             if not local:
                 return
-            # relativ -> absolut
             abs_local = [{"start": s["start"] + w0, "end": s["end"] + w0, "speaker": s["speaker"]} for s in local]
             zone = (w0, w0 + (OVERLAP_SEC if idx > 0 else 0.0))
             mapped, mapping, _z = reconcile_chunk(abs_local, zone, global_segments)
             if not mapped:
                 return
-            # Bestand fortschreiben: Zone ersetzen, Rest behalten
+            # Phase 3 Step 3: Voice-Bank pro lokaler ID (Port von DiarizationChunkWorker 4b)
+            try:
+                import numpy as np
+                snap_f32 = _window_samples(snap)
+                max_gid = max([g["speaker"] for g in global_segments], default=-1)
+                fresh = max_gid + 1
+                final_map = dict(mapping)
+                # alle lokalen IDs, längster Block je ID
+                for lid in sorted({s["speaker"] for s in abs_local}):
+                    cand = [s for s in abs_local if s["speaker"] == lid]
+                    best = max(cand, key=lambda s: s["end"] - s["start"])
+                    dur_ms = int((best["end"] - best["start"]) * 1000)
+                    samples = _slice_for(best["start"], best["end"], w0, snap_f32)
+                    if len(samples) == 0:
+                        continue
+                    # 1) Bank-Identify (bekannte Stimme -> mappen)
+                    bank_hit = await loop.run_in_executor(_executor, voice_bank.identify, list(samples))
+                    if bank_hit is not None:
+                        final_map[lid] = bank_hit
+                        last_bank_end, last_bank_gid = best["end"], bank_hit
+                        log.info("VB resolve local=%s -> global=%s (statt %s)", lid, bank_hit, mapping.get(lid))
+                        continue
+                    # 2) Kontinuitätserbe: direkter Anschluss <12s, Block >=1s
+                    gap = best["start"] - last_bank_end
+                    if last_bank_gid is not None and 0 <= gap <= 12 and dur_ms >= 1000:
+                        final_map[lid] = last_bank_gid
+                        last_bank_end = best["end"]
+                        continue
+                    tgt = mapping.get(lid)
+                    if tgt is None:
+                        continue
+                    # 3) wirklich neu -> enroll unter Ziel-ID
+                    is_new = lid not in [k for k in mapping.keys() if k in final_map and final_map[k] == tgt] or True
+                    # vereinfacht: wenn Ziel nicht in Bank -> enroll (Phantom/Neu)
+                    if not voice_bank.has(tgt):
+                        ok = await loop.run_in_executor(_executor, voice_bank.enroll, tgt, list(samples), dur_ms, True)
+                        log.info("VB enroll global=%s ok=%s", tgt, ok)
+                    else:
+                        # Fehlzuordnung auf echte Bank-ID -> frische ID, kein Quick-Confirm
+                        while voice_bank.has(fresh):
+                            fresh += 1
+                        final_map[lid] = fresh
+                        ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, False)
+                        log.info("VB fresh global=%s ok=%s (Fehlzuordnung von %s)", fresh, ok, tgt)
+                        fresh += 1
+                        last_bank_end, last_bank_gid = best["end"], final_map[lid]
+                        continue
+                    last_bank_end, last_bank_gid = best["end"], final_map.get(lid, tgt)
+                # korrigierte Segmente anwenden
+                if final_map != mapping:
+                    mapped = [{"start": s["start"], "end": s["end"], "speaker": final_map.get(s["speaker"], s["speaker"])} for s in abs_local if (s["end"]-s["start"]) >= MIN_FRAGMENT_SEC]
+                    mapping = final_map
+            except Exception:
+                log.exception("voice-bank step failed, nutze Reconciler-Mapping")
             kept = [g for g in global_segments if not (g["end"] > zone[0] and g["start"] < zone[1])]
             kept.extend(mapped)
             global_segments.clear()
@@ -357,7 +564,7 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "diarization_live", "segments": list(global_segments), "chunk": idx}))
             except RuntimeError:
                 pass
-            log.info("Rolling chunk %s: window=%.1f-%.1fs local=%s speakers -> global=%s speakers mapping=%s", idx, w0, w1, len(abs_local), len(mapped), mapping)
+            log.info("Rolling chunk %s: window=%.1f-%.1fs local=%s speakers -> global=%s speakers mapping=%s bank=%s", idx, w0, w1, len(abs_local), len(mapped), mapping, len(voice_bank.voiceprints))
         except Exception:
             log.exception("rolling chunk %s failed", idx)
 
