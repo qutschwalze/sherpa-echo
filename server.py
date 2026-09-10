@@ -362,7 +362,9 @@ class PySessionVoiceBank:
             return True
         if gid in self.pending:
             old = self.pending[gid]
-            if _cosine(old, emb) >= self.pending_thr:
+            _sim_pc = _cosine(old, emb)
+            log.info("VB pending-check global=%s sim=%.3f thr=%.2f dur=%s", gid, _sim_pc, self.pending_thr, dur_ms)
+            if _sim_pc >= self.pending_thr:
                 self.pending.pop(gid)
                 self.voiceprints[gid] = [(a+b)/2 for a, b in zip(old, emb)]
                 self.counts[gid] = 2
@@ -371,11 +373,16 @@ class PySessionVoiceBank:
             return False
         self.pending[gid] = emb
         if allow_quick and dur_ms >= int(self.quick_sec*1000):
+            sims_v = {oid: round(_cosine(emb, vp), 3) for oid, vp in self.voiceprints.items() if oid != gid}
+            sims_p = {oid: round(_cosine(emb, pe), 3) for oid, pe in self.pending.items() if oid != gid}
+            log.info("VB quickcheck global=%s sims_v=%s sims_p=%s thr=%.2f", gid, sims_v, sims_p, self.pending_thr)
             for oid, vp in self.voiceprints.items():
                 if oid != gid and _cosine(emb, vp) >= self.pending_thr:
+                    log.info("VB quick-DRIFT global=%s -> %s sim=%.3f", gid, oid, _cosine(emb, vp))
                     return False
             for oid, pe in self.pending.items():
                 if oid != gid and _cosine(emb, pe) >= self.pending_thr:
+                    log.info("VB quick-DRIFT-pending global=%s -> %s", gid, oid)
                     return False
             old = self.pending.pop(gid)
             self.voiceprints[gid] = old
