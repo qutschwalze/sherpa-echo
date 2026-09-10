@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
  * Thin client für Echo Show 5 (FireOS 6, API 25, MT8163).
  *
  * Statt lokaler ONNX-Inferenz (43s Init, 285MB, ANR) streamt er PCM 16kHz
- * zu SHERPA_SERVER_URL (Build-Env, LAN WebSocket zum sherpa-server).
+ * zu ws://172.16.120.218:8010/ws (sherpa-server auf BookStack-VM, i5-7400T).
  *
  * Protokoll (server.py):
  *   client -> server: binary PCM int16 LE mono 16kHz (20-100ms Chunks)
@@ -50,6 +50,9 @@ class SherpaWsClient(
         data class Diarization(val segments: List<DiarSegment>) : WsEvent()
         data object Done : WsEvent()
         data class Error(val msg: String) : WsEvent()
+        // Step 5 (DE/EN): erkannte Sprache + Modus-Bestaetigung (display-only)
+        data class LangDetected(val lang: String) : WsEvent()
+        data class LangReady(val mode: String) : WsEvent()
     }
 
     fun connect() {
@@ -97,6 +100,8 @@ class SherpaWsClient(
                         }
                         "done" -> events.trySend(WsEvent.Done)
                         "error" -> events.trySend(WsEvent.Error(j.optString("msg", "server error")))
+                        "lang" -> events.trySend(WsEvent.LangDetected(j.optString("lang", "de")))
+                        "lang_ready" -> events.trySend(WsEvent.LangReady(j.optString("mode", "de_only")))
                         else -> {
                             // compat official streaming_server.py: {text:"...", segment:int}
                             if (j.has("text")) {
@@ -142,6 +147,11 @@ class SherpaWsClient(
 
     fun sendReset() {
         ws?.send("""{"type":"reset"}""")
+    }
+
+    // Step 5 (DE/EN): Opt-in direkt nach Connect (Server antwortet lang_ready)
+    fun sendLangMode(deEnAuto: Boolean) {
+        if (deEnAuto) ws?.send("""{"type":"lang_mode","mode":"de_en_auto"}""")
     }
 
     var pendingDiarization: List<DiarSegment>? = null

@@ -49,6 +49,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -116,6 +118,7 @@ fun TranscriptDetailScreen(
                     // Phase 4 (0.6.2): Export als TXT/Markdown/JSON via ShareSheet
                     val context = LocalContext.current
                     var exportMenuOpen by remember { mutableStateOf(false) }
+                    val menuScope = rememberCoroutineScope()
                     IconButton(
                         onClick = { exportMenuOpen = true },
                         enabled = uiState.transcript != null && uiState.segments.isNotEmpty(),
@@ -132,6 +135,28 @@ fun TranscriptDetailScreen(
                                 onClick = {
                                     exportMenuOpen = false
                                     exportTranscript(context, uiState.transcript, uiState.segments, format)
+                                },
+                            )
+                        }
+                        // Step 6: Wiki-Ingest (direkter POST, ohne MirMir-App).
+                        // 0.10.8-Fallback (MirMir-Outbox) bleibt, falls konfiguriert + installiert.
+                        if (com.sherpa.transcript.data.wiki.WikiIngestClient.isConfigured()) {
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text("An Wiki senden") },
+                                onClick = {
+                                    exportMenuOpen = false
+                                    val tr = uiState.transcript
+                                    if (tr != null) {
+                                        val md = TranscriptExporter.formatMarkdown(tr, uiState.segments)
+                                        menuScope.launch {
+                                            val res = com.sherpa.transcript.data.wiki.WikiIngestClient.sendMeeting(tr.title, md)
+                                            res.fold(
+                                                onSuccess = { android.widget.Toast.makeText(context, "An Wiki gesendet", android.widget.Toast.LENGTH_SHORT).show() },
+                                                onFailure = { e -> android.widget.Toast.makeText(context, "Wiki-Fehler: ${e.message}", android.widget.Toast.LENGTH_LONG).show() },
+                                            )
+                                        }
+                                    }
                                 },
                             )
                         }

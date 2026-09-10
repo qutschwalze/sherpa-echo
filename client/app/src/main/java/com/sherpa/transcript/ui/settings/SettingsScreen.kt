@@ -78,6 +78,10 @@ fun SettingsScreen(settingsStore: SettingsStore = SettingsStore.current, onNavig
     var uploadResult by remember { mutableStateOf<String?>(null) }
     var serverUrlInput by remember { mutableStateOf(debugServerUrl) }
     var apiKeyInput by remember { mutableStateOf(debugApiKey) }
+    val wikiIngestUrl by settingsStore.wikiIngestUrl.collectAsState()
+    val wikiIngestToken by settingsStore.wikiIngestToken.collectAsState()
+    var wikiUrlInput by remember { mutableStateOf(wikiIngestUrl) }
+    var wikiTokenInput by remember { mutableStateOf(wikiIngestToken) }
     var maxFiles by remember { mutableIntStateOf(2) } // 0 = alle, 1-10 = letzte N Sessions
 
     Scaffold(
@@ -288,6 +292,75 @@ fun SettingsScreen(settingsStore: SettingsStore = SettingsStore.current, onNavig
                         enabled = apiKeyInput != debugApiKey,
                     ) {
                         Text("Key speichern")
+                    }
+                }
+
+                // Step 6: Wiki-Ingest (manuell, Theme-Plugin, ohne MirMir-App)
+                item {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SectionTitle("Wiki-Ingest (BookStack)")
+                }
+
+                item {
+                    Text(
+                        text = "Ingest-URL",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = "Volle Adresse des Theme-Plugins, z. B. Basis-URL plus /mirmirstack/ingest. Nur manuell pro Transkript gesendet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = wikiUrlInput,
+                        onValueChange = { wikiUrlInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        placeholder = {
+                            Text(
+                                "Wiki-Basis plus /mirmirstack/ingest",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        },
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Button(
+                        onClick = { settingsStore.setWikiIngestUrl(wikiUrlInput) },
+                        enabled = wikiUrlInput.isNotBlank() && wikiUrlInput != wikiIngestUrl,
+                    ) {
+                        Text("URL speichern")
+                    }
+                }
+
+                item {
+                    Text(
+                        text = "Ingest-Token",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = wikiTokenInput,
+                        onValueChange = { wikiTokenInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        placeholder = {
+                            Text(
+                                "X-MirMir-Token aus der Server-Konfiguration",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        },
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Button(
+                        onClick = { settingsStore.setWikiIngestToken(wikiTokenInput) },
+                        enabled = wikiTokenInput != wikiIngestToken,
+                    ) {
+                        Text("Token speichern")
                     }
                 }
 

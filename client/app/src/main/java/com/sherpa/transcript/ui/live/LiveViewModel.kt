@@ -254,7 +254,7 @@ class LiveViewModel : ViewModel() {
 
     private var captureJob: Job? = null
     private var diarizationJob: Job? = null
-    // Thin client: SHERPA_SERVER_URL aus Build-Env – kein lokales ONNX
+    // Thin client (Echo Show 5): ws://172.16.120.218:8010/ws – kein lokales ONNX
     private val isThinClient: Boolean = com.sherpa.transcript.BuildConfig.SHERPA_SERVER_URL.isNotBlank()
     private val wsClient by lazy { SherpaWsClient() }
     private var wsCollectJob: Job? = null
@@ -542,6 +542,19 @@ class LiveViewModel : ViewModel() {
                 isStopping = false; isSavingFinalResult = false
                 deriveUiSegments()
                 wsClient.connect()
+                // Step 5 (DE/EN): Opt-in aus Einstellung (DE_ONLY Standard wie Handy)
+                try {
+                    val deEn = com.sherpa.transcript.data.local.SettingsStore.current.asrLanguageMode.value == com.sherpa.transcript.data.local.AsrLanguageMode.DE_EN_AUTO
+                    // kleiner Versatz: WS muss offen sein, sonst geht die Nachricht verloren
+                    viewModelScope.launch {
+                        var waited = 0
+                        while (waited < 3000 && !wsClient.isConnected.value) {
+                            kotlinx.coroutines.delay(200); waited += 200
+                        }
+                        wsClient.sendLangMode(deEn)
+                        if (deEn) Log.i(TAG, "Thin DE/EN auto requested")
+                    }
+                } catch (_: Exception) {}
                 // Phase 2: server diarization buffering
                 var serverDiarSegments: List<DiarizationSegment> = emptyList()
                 wsCollectJob = viewModelScope.launch {
@@ -597,6 +610,8 @@ class LiveViewModel : ViewModel() {
                             }
                             is SherpaWsClient.WsEvent.Done -> Log.i(TAG, "WS done")
                             is SherpaWsClient.WsEvent.Error -> _uiState.update { it.copy(error = ev.msg) }
+                            is SherpaWsClient.WsEvent.LangDetected -> Log.i(TAG, "Thin lang detected: ${ev.lang}")
+                            is SherpaWsClient.WsEvent.LangReady -> Log.i(TAG, "Thin lang mode: ${ev.mode}")
                         }
                     }
                 }

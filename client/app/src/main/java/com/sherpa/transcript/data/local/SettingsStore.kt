@@ -79,6 +79,29 @@ class SettingsStore private constructor(context: Context) {
         _asrLanguageMode.value = mode
     }
 
+    /** Step 6: Wiki-Ingest (manuell, direkter POST an Theme-Plugin, ohne MirMir-App). */
+    private val _wikiIngestUrl = MutableStateFlow(
+        prefs.getString(KEY_WIKI_INGEST_URL, "") ?: ""
+    )
+    val wikiIngestUrl: StateFlow<String> = _wikiIngestUrl.asStateFlow()
+
+    fun setWikiIngestUrl(url: String) {
+        val normalized = url.trimEnd('/')
+        prefs.edit().putString(KEY_WIKI_INGEST_URL, normalized).apply()
+        _wikiIngestUrl.value = normalized
+    }
+
+    private val _wikiIngestToken = MutableStateFlow(
+        prefs.getString(KEY_WIKI_INGEST_TOKEN, "") ?: ""
+    )
+    val wikiIngestToken: StateFlow<String> = _wikiIngestToken.asStateFlow()
+
+    fun setWikiIngestToken(token: String) {
+        val normalized = token.trim()
+        prefs.edit().putString(KEY_WIKI_INGEST_TOKEN, normalized).apply()
+        _wikiIngestToken.value = normalized
+    }
+
     /** 0.12.0: API-Key für Debug-Upload-Server (Threat Model T5/T18). */
     private val _debugApiKey = MutableStateFlow(
         prefs.getString(KEY_DEBUG_API_KEY, "") ?: ""
@@ -97,6 +120,8 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_DEBUG_SERVER_URL = "debugServerUrl"
         private const val KEY_ASR_LANGUAGE = "asrLanguageMode"
         private const val KEY_DEBUG_API_KEY = "debugApiKey"
+        private const val KEY_WIKI_INGEST_URL = "wikiIngestUrl"
+        private const val KEY_WIKI_INGEST_TOKEN = "wikiIngestToken"
         private const val DEFAULT_DEBUG_SERVER_URL = "http://10.0.2.2:8520"
 
         @Volatile
