@@ -34,4 +34,4 @@ fi
 
 echo ">> Done – prüfen:"
 ls -lh "$MODELS_DIR/kroko-de/" "$MODELS_DIR"/*.onnx
-echo "Auf VM deploy: rsync -avz ./models/ root@172.16.120.218:/root/sherpa-server/models/"
+echo "Deploy: rsync -avz ./models/ <server>:/<server-path>/models/ (Zielhost nicht ins Repo schreiben)"

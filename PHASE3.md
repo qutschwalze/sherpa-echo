@@ -1,7 +1,6 @@
 # Phase 3 – Thin-Client-Parität + Privacy/Security by Design
 
-Separat vom Hauptprojekt `/root/sherpa-app` (offline, minSdk 26).
-Betrifft nur `/root/sherpa-server` + `/root/sherpa-fireos6-client`.
+Separates Thin-Client-Projekt (Server + Client als Ableger).
 
 ## 1. Paritäts-Lücke (Stand v13e)
 
@@ -17,16 +16,16 @@ Folge: 2 klare Sprecher ok, 3+ / Kurzbeiträge / Drift schlechter als Handy.
 
 ## 2. Threat Model (LAN, kein Cloud)
 
-- **Abhören im LAN:** ws:// Klartext, jeder im 172.16.120.0/24 kann PCM + Transkript mitschneiden.
+- **Abhören im LAN:** ws:// Klartext, jeder im gleichen LAN kann PCM + Transkript mitschneiden.
 - **Unbefugter Client:** offener Port 8010 ohne Auth – Nachbar kann transkribieren / Server belegen.
 - **Retention:** Audio-Buffer im RAM, Transkript-Text in Logs? Derzeit keine Text-Logs, aber nicht garantiert.
-- **DoS:** unbegrenzte Session-Länge / Verbindungen blockieren i5-7400T (2 Kerne).
+- **DoS:** unbegrenzte Session-Länge / Verbindungen blockieren den Server (2 Kerne).
 - **Persistenz:** globale Voiceprints sind Biometrie – dürfen nicht ohne Opt-in auf Server liegen.
 
 ## 3. Maßnahmen (Security by Design)
 
 1. **Token-Auth:** `SHERPA_TOKEN` (env, 32B), Client `?token=` + `Authorization: Bearer`. Ohne Token → 403. Kein Default-Token im Repo.
-2. **LAN-Bindung + Doku:** `8010` nur LAN, kein Caddy/Internet. Optional `wss://` mit selbstsigniertem Zertifikat + Pinning (FireOS-TLS ist für Internet-CAs kaputt, für LAN-Pinning tauglich – prüfen).
+2. **LAN-Bindung + Doku:** `8010` nur LAN, kein Caddy/Internet. Optional `wss://` mit selbstsigniertem Zertifikat + Pinning (TLS für LAN-Pinning tauglich – prüfen).
 3. **No-Retention:** Audio nur RAM (`audio_buffer` pro Verbindung), nach `done`/Disconnect `clear()` + `del`. Keine WAV/md auf Server-Disk. Logs nur Zähler (Segmente, Dauer, Speakerzahl), nie Text, nie Embeddings.
 4. **Limits:** max Session 30min / 250MB Buffer, max 2 parallele WS, `max_queue` begrenzt. Darüber 403/413.
 5. **Voice-Bank session-only:** Bank lebt nur pro Verbindung, wird nach Disconnect verworfen. Persistente Profile (falls gewünscht) nur auf Client (Room), nie Server-Disk. Default OFF.

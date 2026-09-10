@@ -4,7 +4,7 @@ services:
     container_name: sherpa-server
     restart: unless-stopped
     ports:
-      - "8010:8001"  # LAN ws://172.16.120.218:8010/ws – FireOS ws:// umgeht kaputtes TLS
+      - "8010:8001"  # LAN-only, kein Reverse-Proxy/Internet
     environment:
       - SHERPA_MODEL=kroko-de
       - SHERPA_NUM_THREADS=2
