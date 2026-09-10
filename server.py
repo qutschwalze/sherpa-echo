@@ -584,6 +584,9 @@ async def ws_endpoint(ws: WebSocket):
             except RuntimeError:
                 pass
             log.info("Rolling chunk %s: window=%.1f-%.1fs local=%s speakers -> global=%s speakers mapping=%s bank=%s", idx, w0, w1, len(abs_local), len(mapped), mapping, len(voice_bank.voiceprints))
+            log.info("Rolling chunk %s bestand=%s mapped=%s", idx,
+                     [(round(g["start"],1), round(g["end"],1), g["speaker"]) for g in global_segments],
+                     [(round(m["start"],1), round(m["end"],1), m["speaker"]) for m in mapped])
         except Exception:
             log.exception("rolling chunk %s failed", idx)
 
@@ -607,7 +610,8 @@ async def ws_endpoint(ws: WebSocket):
                         if global_segments:
                             try:
                                 await ws.send_text(json.dumps({"type": "diarization", "segments": list(global_segments), "rolling": True}))
-                                log.info("Diarization sent (rolling): %s segs", len(global_segments))
+                                log.info("Diarization sent (rolling): %s segs %s", len(global_segments),
+                                         [(round(g["start"],1), round(g["end"],1), g["speaker"]) for g in global_segments])
                             except RuntimeError:
                                 log.warning("rolling send WebSocketDisconnect")
                             except Exception:
