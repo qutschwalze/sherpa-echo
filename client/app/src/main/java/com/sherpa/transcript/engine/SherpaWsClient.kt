@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
  * Thin client für Echo Show 5 (FireOS 6, API 25, MT8163).
  *
  * Statt lokaler ONNX-Inferenz (43s Init, 285MB, ANR) streamt er PCM 16kHz
- * zu ws://172.16.120.218:8010/ws (sherpa-server auf BookStack-VM, i5-7400T).
+ * zu SHERPA_SERVER_URL (Build-Env, LAN WebSocket zum sherpa-server).
  *
  * Protokoll (server.py):
  *   client -> server: binary PCM int16 LE mono 16kHz (20-100ms Chunks)

@@ -254,7 +254,7 @@ class LiveViewModel : ViewModel() {
 
     private var captureJob: Job? = null
     private var diarizationJob: Job? = null
-    // Thin client (Echo Show 5): ws://172.16.120.218:8010/ws – kein lokales ONNX
+    // Thin client: SHERPA_SERVER_URL aus Build-Env – kein lokales ONNX
     private val isThinClient: Boolean = com.sherpa.transcript.BuildConfig.SHERPA_SERVER_URL.isNotBlank()
     private val wsClient by lazy { SherpaWsClient() }
     private var wsCollectJob: Job? = null
