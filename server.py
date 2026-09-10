@@ -275,13 +275,13 @@ def _cosine(a, b):
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 class PySessionVoiceBank:
-    # Port von SessionVoiceBank.kt: match 0.62, pending 0.35, minEnroll/Identify 2s, Quick-Confirm 4s
+    # Port von SessionVoiceBank.kt: match 0.62, pending 0.50 (Server: 0.35 verwarf echte Zweitstimme sim 0.44), minEnroll/Identify 2s, Quick-Confirm 4s
     def __init__(self):
         self.voiceprints = {}
         self.counts = {}
         self.pending = {}
         self.match_thr = 0.62
-        self.pending_thr = 0.35
+        self.pending_thr = 0.50
         self.min_enroll_sec = 2.0
         self.min_ident_sec = 2.0
         self.quick_sec = 4.0
@@ -575,7 +575,19 @@ async def ws_endpoint(ws: WebSocket):
                     mapping = final_map
             except Exception:
                 log.exception("voice-bank step failed, nutze Reconciler-Mapping")
-            kept = [g for g in global_segments if not (g["end"] > zone[0] and g["start"] < zone[1])]
+            # Fix 3d: nur den Zonen-Anteil ersetzen, Reste außerhalb clippen.
+            # Vorher: jedes überlappende Segment fiel ganz weg -> Lücken
+            # (z.B. 70-85s, 88-100s), Bestand kollabierte auf letzte Fenster.
+            z0, z1 = zone
+            kept = []
+            for g in global_segments:
+                if g["end"] <= z0 or g["start"] >= z1:
+                    kept.append(g)
+                else:
+                    if g["start"] < z0 and (z0 - g["start"]) >= MIN_FRAGMENT_SEC:
+                        kept.append({"start": g["start"], "end": z0, "speaker": g["speaker"]})
+                    if g["end"] > z1 and (g["end"] - z1) >= MIN_FRAGMENT_SEC:
+                        kept.append({"start": z1, "end": g["end"], "speaker": g["speaker"]})
             kept.extend(mapped)
             global_segments.clear()
             global_segments.extend(sorted(kept, key=lambda x: x["start"]))
