@@ -535,6 +535,11 @@ async def ws_endpoint(ws: WebSocket):
                     dur_ms = total_dur_ms
                     if len(samples) == 0:
                         log.info("VB skip local=%s: keine Samples (Blöcke=%s)", lid, len(cand))
+                        # Step 4: Phantom ohne Samples nicht behalten
+                        _tgt = mapping.get(lid)
+                        if _tgt is not None and not voice_bank.has(_tgt) and last_bank_gid is not None:
+                            final_map[lid] = last_bank_gid
+                            log.info("VB skip-fallback local=%s -> global=%s (statt Phantom %s)", lid, last_bank_gid, _tgt)
                         continue
                     # 1) Bank-Identify (bekannte Stimme -> mappen)
                     bank_hit = await loop.run_in_executor(_executor, voice_bank.identify, list(samples))
@@ -553,11 +558,22 @@ async def ws_endpoint(ws: WebSocket):
                     if tgt is None:
                         continue
                     # 3) wirklich neu -> enroll unter Ziel-ID
+                    # Step 4 (Langzeit-Fix): Phantom-IDs ohne Voiceprint duerfen
+                    # nicht im Bestand bleiben. Enroll-Fehlschlag (kurz/dreckig)
+                    # faellt auf Kontinuitaet zurueck statt neue ID zu behalten.
                     is_new = lid not in [k for k in mapping.keys() if k in final_map and final_map[k] == tgt] or True
                     # vereinfacht: wenn Ziel nicht in Bank -> enroll (Phantom/Neu)
                     if not voice_bank.has(tgt):
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, tgt, list(samples), dur_ms, True)
                         log.info("VB enroll global=%s ok=%s total_dur=%sms best=%sms blocks=%s", tgt, ok, dur_ms, best_dur_ms, len(cand))
+                        if not ok:
+                            # Enroll gescheitert (zu kurz/drift) -> kein Phantom,
+                            # sondern Anschluss an letzte bestaetigte Stimme
+                            if last_bank_gid is not None:
+                                final_map[lid] = last_bank_gid
+                                log.info("VB enroll-fail fallback local=%s -> global=%s (statt Phantom %s)", lid, last_bank_gid, tgt)
+                                last_bank_end = best["end"]
+                            continue
                     else:
                         # Fehlzuordnung auf echte Bank-ID -> frische ID, kein Quick-Confirm
                         while voice_bank.has(fresh):
@@ -565,6 +581,17 @@ async def ws_endpoint(ws: WebSocket):
                         final_map[lid] = fresh
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, True)
                         log.info("VB fresh global=%s ok=%s total_dur=%sms blocks=%s (Fehlzuordnung von %s)", fresh, ok, dur_ms, len(cand), tgt)
+                        if not ok:
+                            # Fresh ohne Voiceprint -> zurueck auf Reconciler-Ziel,
+                            # kein neues Phantom im Bestand
+                            final_map[lid] = tgt
+                            log.info("VB fresh-fail fallback local=%s -> global=%s (statt Phantom %s)", lid, tgt, fresh)
+                            if last_bank_gid is not None:
+                                final_map[lid] = last_bank_gid
+                                log.info("VB fresh-fail continuity local=%s -> global=%s", lid, last_bank_gid)
+                            last_bank_end = best["end"]
+                            fresh += 1
+                            continue
                         fresh += 1
                         last_bank_end, last_bank_gid = best["end"], final_map[lid]
                         continue
