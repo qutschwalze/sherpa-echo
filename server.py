@@ -33,6 +33,12 @@ LOGS_DIR = Path("/logs")
 # Kroko DE – gleiche Files wie Android ModelDownloadManager
 KROKO_REPO = "csukuangfj/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06"
 KROKO_FILES = ["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"]
+# Step 5 (DE/EN): EN-Zipformer wie Handy (ModelDownloadManager "en-zipformer").
+# Opt-in pro Verbindung (Client sendet {"type":"lang_mode","mode":"de_en_auto"}),
+# Standard bleibt DE_ONLY. ~38MB extra, session-only, RAM-only.
+EN_REPO = "csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26"
+EN_FILES = ["encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx", "decoder-epoch-99-avg-1-chunk-16-left-128.onnx", "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx", "tokens.txt"]
+LANG_DETECT_MS = 3000
 # Diarization – gleiche wie SpeakerModelDownloadManager (gecached auf Show: 47M)
 SEGMENTATION_MODEL = MODELS_DIR / "segmentation.onnx"
 EMBEDDING_MODEL = MODELS_DIR / "embedding.onnx"
@@ -57,13 +63,27 @@ def ensure_models():
     return True
 
 
+def ensure_en_models() -> bool:
+    # Step 5: EN-Modell nur pruefen wenn DE/EN angefordert (Opt-in)
+    base = model_path("en-zipformer")
+    if not base.exists():
+        return False
+    return all((base / f).exists() for f in EN_FILES)
+
+
 class SherpaSession:
-    def __init__(self):
-        base = model_path("kroko-de")
-        tokens = str(base / "tokens.txt")
-        encoder = str(base / "encoder.onnx")
-        decoder = str(base / "decoder.onnx")
-        joiner = str(base / "joiner.onnx")
+    def __init__(self, model: str = "kroko-de"):
+        base = model_path(model)
+        if model == "en-zipformer":
+            tokens = str(base / "tokens.txt")
+            encoder = str(base / "encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx")
+            decoder = str(base / "decoder-epoch-99-avg-1-chunk-16-left-128.onnx")
+            joiner = str(base / "joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx")
+        else:
+            tokens = str(base / "tokens.txt")
+            encoder = str(base / "encoder.onnx")
+            decoder = str(base / "decoder.onnx")
+            joiner = str(base / "joiner.onnx")
         num_threads = int(os.getenv("SHERPA_NUM_THREADS", "2"))
         # API analog zu SherpaOnnxEngine.kt: streaming zipformer
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
@@ -79,6 +99,7 @@ class SherpaSession:
         )
         self.stream = self.recognizer.create_stream()
         self.t_ms = 0  # kumulierte Audiozeit für Client
+        self.has_final_text = False  # Step 5: Sprach-Detect (finaler Text gesehen?)
 
     def accept(self, pcm_int16: bytes):
         samples = np.frombuffer(pcm_int16, dtype=np.int16).astype(np.float32) / 32768.0
@@ -421,15 +442,30 @@ def get_sherpa():
         if not ensure_models():
             raise RuntimeError("Models not found – run download_models.sh first")
         log.info("Loading sherpa-onnx kroko-de …")
-        _sherpa_singleton = SherpaSession()
+        _sherpa_singleton = SherpaSession("kroko-de")
         log.info("Sherpa ready")
     return _sherpa_singleton
+
+
+_en_singleton = None
+
+def get_en_session():
+    # Step 5: EN-Session lazy laden (nur bei DE/EN-Opt-in, ~38MB extra RAM)
+    global _en_singleton
+    if _en_singleton is None:
+        if not ensure_en_models():
+            raise RuntimeError("EN models not found – run download_models.sh first")
+        log.info("Loading sherpa-onnx en-zipformer …")
+        _en_singleton = SherpaSession("en-zipformer")
+        log.info("EN ready")
+    return _en_singleton
 
 
 @app.get("/health")
 async def health():
     ok = ensure_models()
-    return {"ok": ok, "model": "kroko-de", "ready": _sherpa_singleton is not None}
+    return {"ok": ok, "model": "kroko-de", "ready": _sherpa_singleton is not None,
+            "en_available": ensure_en_models(), "en_ready": _en_singleton is not None}
 
 
 @app.get("/")
@@ -468,12 +504,19 @@ async def ws_endpoint(ws: WebSocket):
     # Pro Verbindung eigene Session (kein Mischen)
     try:
         base = model_path("kroko-de")
-        # Eigene Recognizer-Instanz pro Client
-        session = SherpaSession()
+        # Eigene Recognizer-Instanz pro Client (DE immer)
+        session = SherpaSession("kroko-de")
     except Exception as e:
         await ws.send_text(json.dumps({"type": "error", "msg": str(e)}))
         await ws.close()
         return
+    # Step 5 (DE/EN): Opt-in pro Verbindung. Client sendet
+    # {"type":"lang_mode","mode":"de_en_auto"} direkt nach Connect.
+    # Standard DE_ONLY. EN-Session lazy, nach 3s Gewinner-Prinzip wie Handy
+    # (beide parallel, Gewinner behalten, Verlierer stoppen).
+    lang_mode = "de_only"
+    session_en = None
+    detected_lang = None  # None = Detect laeuft, "de"/"en" = entschieden
 
     # Phase 2+3: Rolling core – Chunk 15s+5s Overlap, Reconciler, Live-Speaker (Handy-Parität)
     # Session-only, RAM-only (No-Retention). Privacy: nur Zähler loggen, nie Text/Audio.
@@ -635,10 +678,23 @@ async def ws_endpoint(ws: WebSocket):
             if "text" in msg and msg["text"] is not None:
                 try:
                     ctrl = json.loads(msg["text"])
+                    if ctrl.get("type") == "lang_mode" and ctrl.get("mode") == "de_en_auto":
+                        if detected_lang is None and session_en is None:
+                            try:
+                                loop0 = asyncio.get_running_loop()
+                                session_en = await loop0.run_in_executor(_executor, get_en_session)
+                                lang_mode = "de_en_auto"
+                                log.info("DE/EN auto enabled for session")
+                                await ws.send_text(json.dumps({"type": "lang_ready", "mode": "de_en_auto"}))
+                            except Exception as e:
+                                log.warning("EN model unavailable, staying DE_ONLY: %s", e)
+                                await ws.send_text(json.dumps({"type": "lang_ready", "mode": "de_only", "note": "en_unavailable"}))
+                        continue
                     if ctrl.get("type") == "stop":
-                        text = session.get_result()
+                        _active = session_en if detected_lang == "en" and session_en is not None else session
+                        text = _active.get_result()
                         if text:
-                            await ws.send_text(json.dumps({"type": "final", "text": text, "t_ms": session.t_ms, "is_final": True}))
+                            await ws.send_text(json.dumps({"type": "final", "text": text, "t_ms": _active.t_ms, "is_final": True, "lang": detected_lang or "de"}))
                         # Stop: Rolling-Bestand ist primär (Handy-Parität); Full-Pass nur Fallback
                         # wenn Rolling leer (z.B. sehr kurze Session). done immer danach.
                         if diar_task is not None and not diar_task.done():
@@ -712,18 +768,43 @@ async def ws_endpoint(ws: WebSocket):
                     diar_task = asyncio.create_task(_run_chunk(chunk_index, w0, w1, snap))
                     chunk_index += 1
                     next_chunk_end_sec += CHUNK_SEC
-                session.accept(pcm)
-                text = session.get_result()
-                is_final = session.is_endpoint()
+                # Step 5: DE/EN-Routing (Handy-Prinzip: 3s beide, dann Gewinner)
+                _detecting = lang_mode == "de_en_auto" and detected_lang is None and session_en is not None
+                if _detecting:
+                    session.accept(pcm)
+                    try:
+                        session_en.accept(pcm)
+                    except Exception:
+                        pass
+                    _de_res = session.get_result()
+                    _en_res = session_en.get_result()
+                    if _de_res:
+                        session.has_final_text = True
+                    if _en_res:
+                        session_en.has_final_text = True
+                    if session.t_ms >= LANG_DETECT_MS:
+                        # Default DE (primaeres Modell, Stille, oder beide mit Text)
+                        detected_lang = "en" if (session_en.has_final_text and not session.has_final_text) else "de"
+                        log.info("Lang detected: %s (de=%s en=%s)", detected_lang, session.has_final_text, session_en.has_final_text)
+                        await ws.send_text(json.dumps({"type": "lang", "lang": detected_lang}))
+                    _active = session
+                    text = _de_res
+                else:
+                    _active = session_en if detected_lang == "en" and session_en is not None else session
+                    _active.accept(pcm)
+                    text = _active.get_result()
+                is_final = _active.is_endpoint()
                 if text:
                     await ws.send_text(json.dumps({
                         "type": "final" if is_final else "partial",
                         "text": text,
-                        "t_ms": session.t_ms,
+                        "t_ms": _active.t_ms,
                         "is_final": is_final,
                     }))
                     if is_final:
-                        session.reset_endpoint()
+                        _active.reset_endpoint()
+                        if _detecting:
+                            session.has_final_text = True
     except WebSocketDisconnect:
         log.info("WS disconnect")
     except Exception as e:

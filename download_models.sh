@@ -32,6 +32,14 @@ else
   echo "  skip embedding.onnx"
 fi
 
+echo ">> EN Zipformer (38 MB) – csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26 (Step 5 DE/EN, Opt-in)"
+mkdir -p "$MODELS_DIR/en-zipformer"
+for f in encoder-epoch-99-avg-1-chunk-16-left-128.int8.onnx decoder-epoch-99-avg-1-chunk-16-left-128.onnx joiner-epoch-99-avg-1-chunk-16-left-128.int8.onnx tokens.txt; do
+  if [[ -f "$MODELS_DIR/en-zipformer/$f" && -s "$MODELS_DIR/en-zipformer/$f" ]]; then echo "  skip $f"; continue; fi
+  echo "  get $f"
+  curl -L --progress-bar -o "$MODELS_DIR/en-zipformer/$f" "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26/resolve/main/$f"
+done
+
 echo ">> Done – prüfen:"
 ls -lh "$MODELS_DIR/kroko-de/" "$MODELS_DIR"/*.onnx
 echo "Deploy: rsync -avz ./models/ <server>:/<server-path>/models/ (Zielhost nicht ins Repo schreiben)"
