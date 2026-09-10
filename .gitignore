@@ -13,3 +13,13 @@ uploads/
 transcripts/
 testaufnahmen/
 *.apk
+# Android client build outputs + local SDK path (client/ subproject)
+client/build/
+client/app/build/
+client/.gradle/
+client/local.properties
+client/*.iml
+client/.idea/
+# Binary model artifacts: fetched at build time, never committed
+client/app/libs/*.aar
+client/app/src/main/assets/*.onnx

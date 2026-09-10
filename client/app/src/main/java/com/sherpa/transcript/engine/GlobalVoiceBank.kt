@@ -1,0 +1,237 @@
+package com.sherpa.transcript.engine
+
+import android.util.Log
+import com.sherpa.transcript.data.local.SpeakerProfile
+import java.util.UUID
+
+/**
+ * GlobalVoiceBank (Phase 7) – persistente, geräteweite Speaker-Profile.
+ *
+ * Semantik: BEWUSST strenger als die [SessionVoiceBank]:
+ * - NUR bestätigte Profile (confirmed) – keine pending-/2-Kontakt-Logik.
+ *   Einmal bestätigt (durch die Session-Bank-Maschinerie: 2 Kontakte oder
+ *   Quick-Confirm ≥ 4 s) gilt eine Stimme als Person.
+ * - Match-Schwelle FEST [MATCH_THRESHOLD] = 0.62. Die lockere 0.35-Pending-
+ *   Schwelle der Session-Bank erzeugt auf unbekannte Stimmen (sim ~0.5)
+ *   Falsch-Matches – im Vorbank-A/B-Test (2026-08-22) gemessen: 0.35-Pfad
+ *   legte fremde Stimmen auf bekannte Personen. Die globale Bank matcht
+ *   deshalb NUR mit der strikten Schwelle.
+ * - Profil-ID = UUID, stabil über Sessions. Nummern ("Sprecher 0") bleiben
+ *   session-lokal; die Profil-ID ist der dauerhafte Anker. Namen kommen
+ *   mit 0.7.1 (UI).
+ *
+ * Host-Belege (scripts/host-test/vb_ab_test.py, 2026-08-22):
+ * gleiche Person über Sessions 0.62–0.81, verschiedene ≤ 0.54 → 0.62 trennt
+ * zuverlässig; Auto-Enroll-only-Lauf auf 5-Min-Meeting: korrekte Zuordnung
+ * 24,8 % → 75,2 %.
+ */
+class GlobalVoiceBank(
+    /** Optionaler Embedding-Computer für den Samples-Pfad (Worker-Integration). */
+    private val computer: SpeakerEmbeddingComputer? = null,
+    /** Mindest-Redezeit für den Samples-Match (identisch zur SessionVoiceBank). */
+    private val minIdentifySec: Float = 2f,
+) {
+
+    companion object {
+        private const val TAG = "GlobalVoiceBank"
+
+        /** Feste Match-Schwelle (confirmed-only, quer über alle Sessions). */
+        const val MATCH_THRESHOLD = 0.62f
+    }
+
+    /** Profil-ID → gewichteter Mittelwert-Vektor (Reihenfolge = Anzeige-Reihenfolge). */
+    private val profiles = linkedMapOf<String, FloatArray>()
+
+    /** Profil-ID → Anzahl Enrollment-Beiträge (für den gewichteten Mittelwert). */
+    private val counts = mutableMapOf<String, Int>()
+
+    /** Profil-ID → Anzeige-Name (0.7.2; null = "Sprecher N"). */
+    private val names = mutableMapOf<String, String?>()
+
+    val size: Int get() = profiles.size
+
+    // ── Namens-API (0.7.2) ──────────────────────────────────────────
+
+    /** Setzt/ändert den Anzeige-Namen; null oder blank = "Sprecher N" zurück. */
+    fun rename(profileId: String, name: String?) {
+        names[profileId] = name?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun nameFor(profileId: String): String? = names[profileId]
+
+    /** Anzeige-Label: Name oder Fallback "Sprecher N" (N = fallbackIndex+1). */
+    fun displayLabel(profileId: String, fallbackIndex: Int): String =
+        names[profileId] ?: "Sprecher ${fallbackIndex + 1}"
+
+    /**
+     * Phase 7a: Zwei Profile zusammenführen. `intoId` behält ID + Namen,
+     * das Embedding wird sample-gewichtet gemittelt, `fromId` wird gelöscht.
+     */
+    fun mergeProfiles(fromId: String, intoId: String) {
+        val fromEmb = profiles[fromId] ?: return
+        val intoEmb = profiles[intoId] ?: return
+        val nFrom = counts.getOrDefault(fromId, 1)
+        val nInto = counts.getOrDefault(intoId, 1)
+        val total = nFrom + nInto
+        profiles[intoId] = FloatArray(intoEmb.size) { i ->
+            (intoEmb[i] * nInto + fromEmb[i] * nFrom) / total
+        }
+        counts[intoId] = total
+        profiles.remove(fromId)
+        counts.remove(fromId)
+        names.remove(fromId)
+    }
+
+    /** Phase 7a: Profil komplett löschen (auch Name). */
+    fun deleteProfile(profileId: String) {
+        profiles.remove(profileId)
+        counts.remove(profileId)
+        names.remove(profileId)
+    }
+
+    /**
+     * Beste Cosine-Sim gegen alle Profile (Diagnose).
+     * @return (Profil-ID, Similarity) oder null bei leerer Bank.
+     */
+    fun bestMatch(embedding: FloatArray): Pair<String, Float>? {
+        if (embedding.isEmpty() || profiles.isEmpty()) return null
+        return profiles.entries
+            .map { it.key to SessionVoiceBank.cosineSimilarity(embedding, it.value) }
+            .maxByOrNull { it.second }
+    }
+
+    /**
+     * Match gegen die Profile – NUR über [MATCH_THRESHOLD]. Keine pending.
+     * @return Profil-ID bei Match, sonst null (unbekannte Stimme → neues Profil).
+     */
+    fun identify(embedding: FloatArray): String? {
+        val best = bestMatch(embedding) ?: return null
+        if (best.second > MATCH_THRESHOLD) {
+            Log.d(TAG, String.format("identify: MATCH → %s (sim=%.3f)", best.first.takeLast(8), best.second))
+            return best.first
+        }
+        Log.v(TAG, String.format("identify: KEIN Match – beste=%.3f gegen %s (thr=%.3f)",
+            best.second, best.first.takeLast(8), MATCH_THRESHOLD))
+        return null
+    }
+
+    /**
+     * Samples-basierter Match (Worker-Pfad): embeddet intern über den
+     * [computer] und matcht mit derselben strikten 0.62-Schwelle.
+     * Sub-[minIdentifySec]-Segmente werden nie aufgelöst (instabiles
+     * Embedding, identische Regel wie die SessionVoiceBank).
+     *
+     * @return Profil-ID bei Match, sonst null (auch wenn kein Computer gesetzt).
+     */
+    fun identifySamples(samples: FloatArray): String? {
+        if (computer == null) return null
+        if (samples.size < (minIdentifySec * 16000).toInt()) return null
+        val embedding = computer.computeEmbedding(samples) ?: return null
+        return identify(embedding)
+    }
+
+    /**
+     * Phase 7a (0.7.2): Enroll aus Roh-Samples (manuelle Zuweisung nach Stop).
+     * Gleiche Gates wie der Worker-Pfad: mindestens [minIdentifySec] Audio,
+     * Embedding via [computer]; rolling update wenn das Profil existiert.
+     * @return true wenn die Samples eingelernt wurden (≥ 2 s + Embedding ok).
+     */
+    fun enrollFromSamples(profileId: String, samples: FloatArray): Boolean {
+        if (computer == null || samples.size < (minIdentifySec * 16000).toInt()) return false
+        val embedding = computer.computeEmbedding(samples) ?: return false
+        enroll(profileId, embedding)
+        return true
+    }
+
+    /**
+     * Neues Profil anlegen oder bestehendes per rolling average aktualisieren
+     * (gewichtet nach bisheriger Kontaktzahl – identisch zur SessionVoiceBank).
+     * Aufruf NUR mit BESTÄTIGTEN Kontakten (Auto-Enroll-Pfad)!
+     */
+    fun enroll(profileId: String, embedding: FloatArray) {
+        val existing = profiles[profileId]
+        if (existing != null) {
+            val n = counts.getOrDefault(profileId, 1)
+            profiles[profileId] = FloatArray(existing.size) { i ->
+                (existing[i] * n + embedding[i]) / (n + 1)
+            }
+            counts[profileId] = n + 1
+        } else {
+            profiles[profileId] = embedding.copyOf()
+            counts[profileId] = 1
+        }
+    }
+
+    /** Profil direkt setzen (Initialisierung aus Store / Tests). */
+    fun putProfile(profileId: String, embedding: FloatArray, sampleCount: Int = 1) {
+        profiles[profileId] = embedding.copyOf()
+        counts[profileId] = sampleCount
+    }
+
+    /**
+     * 0.10.7: Cosine-Sim zwischen zwei Profil-Voiceprints – für die
+     * Duplikat-Erkennung im Save (SpeakerOverlayMerger): Zwei Profile, die
+     * dieselbe Person repräsentieren (z. B. durch Drift als "neue" Profile
+     * eingelernt), tragen dann nicht mehr als getrennte Speaker in den Export.
+     * @return Similarity oder null, wenn eines der Profile fehlt.
+     */
+    fun profileSimilarity(profileA: String, profileB: String): Float? {
+        val a = profiles[profileA] ?: return null
+        val b = profiles[profileB] ?: return null
+        return SessionVoiceBank.cosineSimilarity(a, b)
+    }
+
+    fun profileCount(profileId: String): Int = counts.getOrDefault(profileId, 0)
+
+    fun contains(profileId: String): Boolean = profiles.containsKey(profileId)
+
+    /** Bank aus persistierten Profilen ersetzen (App-Start). */
+    fun load(profiles: List<SpeakerProfile>) {
+        this.profiles.clear()
+        counts.clear()
+        names.clear()
+        profiles.forEach { p ->
+            putProfile(p.id, p.embedding, p.sampleCount)
+            names[p.id] = p.name
+        }
+    }
+
+    /** Aktuellen Zustand als persistierbare Profile (für den Store). */
+    fun snapshot(): List<SpeakerProfile> = profiles.entries.map { (id, emb) ->
+        SpeakerProfile(
+            id = id,
+            embedding = emb.copyOf(),
+            sampleCount = counts.getOrDefault(id, 1),
+            updatedAt = System.currentTimeMillis(),
+            name = names[id],
+        )
+    }
+
+    /**
+     * Übernimmt BESTÄTIGTE Kontakte einer Session-Bank in die globale Bank
+     * (Auto-Enroll beim Session-Ende – der Mechanismus, den die Host-Tests
+     * als wirksam belegt haben). Bekannte Stimmen werden gemerged (rolling
+     * average), unbekannte als neues Profil angelegt.
+     *
+     * @param confirmed sessionGid → bestätigter Embedding-Vektor
+     *                  (Quelle: SessionVoiceBank.confirmedVoiceprints())
+     */
+    fun autoEnrollFrom(confirmed: Map<Int, FloatArray>): AutoEnrollResult {
+        val mergedIds = linkedSetOf<String>()
+        val newIds = linkedSetOf<String>()
+        confirmed.forEach { (_, emb) ->
+            val match = identify(emb)
+            if (match != null) {
+                enroll(match, emb)
+                mergedIds += match
+            } else {
+                val id = UUID.randomUUID().toString()
+                enroll(id, emb)
+                newIds += id
+            }
+        }
+        return AutoEnrollResult(mergedIds, newIds)
+    }
+
+    data class AutoEnrollResult(val mergedIds: Set<String>, val newIds: Set<String>)
+}
