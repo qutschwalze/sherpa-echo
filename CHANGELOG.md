@@ -2,6 +2,11 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
+## Step 8b — Persistent server voice anchors, names on device (server)
+
+- Problem: the session bank starts empty on every connection — recurring voices re-enroll as new identities each session, drifting the inventory.
+- Fix: file-based persistent bank (`voicebank.json` in the logs volume, embeddings + stable UUIDs, no names). The session flow checks the persistent anchor (0.62, handset parity) after the session bank misses and before continuity inheritance; confirmed session enrolls are learned persistently. The final diarization message carries `voice_profiles` (session-id → UUID, ignored by older clients); name mapping stays on the device. Server logs only counts and similarities, never audio or text.
+
 ## Step 8a — Drift-threshold parity with handset (server)
 
 - Problem: the server drift guard (0.50) was stricter than the handset (0.35) — a late-joining voice just below 0.50 was kept as a new identity instead of being drift-merged.

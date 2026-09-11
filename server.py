@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 
 import asyncio
@@ -295,6 +296,101 @@ def _cosine(a, b):
         return 0.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
+PERSISTENT_BANK_PATH = Path(os.getenv("VOICEBANK_PATH", str(LOGS_DIR / "voicebank.json")))
+PERSISTENT_MATCH_THR = 0.62  # Handy-Parität (GlobalVoiceBank.MATCH_THRESHOLD), confirmed-only
+
+
+class PersistentVoiceBank:
+    """Step 8b: server-seitige, sitzungsübergreifende Stimm-Anker (namenlos).
+
+    Nur Embeddings + stabile UUIDs, KEINE Namen (Namensmapping lebt auf dem
+    Device). JSON im Logs-Volume (überlebt Restarts), RAM-Cache im Prozess.
+    Learn nur bei bestätigtem Session-Enroll (Handy: GlobalVoiceBank-Prinzip).
+    Logs: nur Zähler + Sims, nie Audio/Text.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.profiles: dict = {}  # uuid -> {"embedding": [...], "count": int}
+        self.load()
+
+    def load(self):
+        try:
+            if self.path.exists():
+                data = json.loads(self.path.read_text())
+                if isinstance(data, dict):
+                    self.profiles = {k: v for k, v in data.items()
+                                     if isinstance(v, dict) and isinstance(v.get("embedding"), list)}
+                    log.info("VB_PERSIST loaded profiles=%s", len(self.profiles))
+        except Exception:
+            log.warning("VB_PERSIST load failed, starte leer")
+
+    def _atomic_save(self):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.profiles))
+            os.replace(tmp, self.path)
+        except Exception:
+            log.warning("VB_PERSIST save failed")
+
+    def identify_emb(self, emb):
+        best_id, best_sim = None, 0.0
+        for puuid, p in self.profiles.items():
+            s = _cosine(emb, p["embedding"])
+            if s > best_sim:
+                best_sim, best_id = s, puuid
+        if best_id is not None and best_sim >= PERSISTENT_MATCH_THR:
+            return best_id, best_sim
+        return None
+
+    def update(self, puuid, emb):
+        p = self.profiles.get(puuid)
+        if p is None:
+            return None
+        c = p.get("count", 1)
+        old = p["embedding"]
+        p["embedding"] = [(a * c + b) / (c + 1) for a, b in zip(old, emb)]
+        p["count"] = c + 1
+        self._atomic_save()
+        return puuid
+
+    def create(self, emb):
+        puuid = uuid.uuid4().hex
+        self.profiles[puuid] = {"embedding": list(emb), "count": 1}
+        self._atomic_save()
+        return puuid
+
+
+_persistent_bank = None
+
+
+def get_persistent_bank() -> PersistentVoiceBank:
+    global _persistent_bank
+    if _persistent_bank is None:
+        _persistent_bank = PersistentVoiceBank(PERSISTENT_BANK_PATH)
+    return _persistent_bank
+
+
+def _persist_learn(voice_bank, gid):
+    """Step 8b: bestätigten Session-Enroll persistent lernen (namenlos, sync, kleine JSON)."""
+    try:
+        emb = voice_bank._last_emb
+        if emb is None:
+            return
+        pb = get_persistent_bank()
+        pu = voice_bank.puuid_map.get(gid)
+        if pu is None:
+            hit = pb.identify_emb(emb)
+            pu = hit[0] if hit else pb.create(emb)
+            voice_bank.puuid_map[gid] = pu
+        else:
+            pb.update(pu, emb)
+        log.info("VB_PERSIST learn global=%s puuid=%s", gid, pu[:8])
+    except Exception:
+        log.warning("VB_PERSIST learn failed")
+
+
 class PySessionVoiceBank:
     # Port von SessionVoiceBank.kt: match 0.62, pending 0.50 (Server: 0.35 verwarf echte Zweitstimme sim 0.44), minEnroll/Identify 2s, Quick-Confirm 4s
     # Step 8a: drift_thr 0.35 nur für Drift-Abfragen (Handy-Parität) – Enroll/Confirm bleiben 0.50/0.62
@@ -305,6 +401,8 @@ class PySessionVoiceBank:
         self.match_thr = 0.62
         self.pending_thr = 0.50
         self.drift_thr = 0.35
+        self.puuid_map = {}  # Step 8b: session-gid -> persistente UUID (Anker, namenlos)
+        self._last_emb = None  # Step 8b: letztes Embedding für Anker/Learn (Chunks sind sequenziell)
         self.min_enroll_sec = 2.0
         self.min_ident_sec = 2.0
         self.quick_sec = 4.0
@@ -331,12 +429,16 @@ class PySessionVoiceBank:
             return None
 
     def identify(self, samples_f32):
+        self._last_emb = None
         if len(samples_f32) < int(self.min_ident_sec * 16000):
             return None
-        if not self.voiceprints and not self.pending:
-            return None
+        # Step 8b: Embedding IMMER berechnen (auch bei leerer Session-Bank),
+        # damit der persistente Anker es nutzen kann.
         emb = self._embed(samples_f32)
         if emb is None:
+            return None
+        self._last_emb = emb
+        if not self.voiceprints and not self.pending:
             return None
         best_id, best_sim, best_pending = None, 0.0, False
         for gid, vp in self.voiceprints.items():
@@ -369,6 +471,7 @@ class PySessionVoiceBank:
         return None
 
     def enroll(self, gid, samples_f32, dur_ms, allow_quick=True):
+        self._last_emb = None
         if dur_ms < int(self.min_enroll_sec * 1000):
             log.info("VB enroll skip global=%s: nur %sms (< %ss)", gid, dur_ms, self.min_enroll_sec)
             return False
@@ -377,6 +480,7 @@ class PySessionVoiceBank:
         emb = self._embed(samples_f32)
         if emb is None:
             return False
+        self._last_emb = emb
         if gid in self.voiceprints:
             c = self.counts.get(gid, 1)
             old = self.voiceprints[gid]
@@ -593,6 +697,30 @@ async def ws_endpoint(ws: WebSocket):
                         last_bank_end, last_bank_gid = best["end"], bank_hit
                         log.info("VB resolve local=%s -> global=%s (statt %s)", lid, bank_hit, mapping.get(lid))
                         continue
+                    # Step 8b: persistenter Anker (0.62, namenlos) VOR Kontinuität:
+                    # sitzungsübergreifend stabile Stimme schlägt Anschluss-Raten.
+                    _pemb = voice_bank._last_emb
+                    if _pemb is not None:
+                        try:
+                            _phit = get_persistent_bank().identify_emb(_pemb)
+                        except Exception:
+                            _phit = None
+                        if _phit is not None:
+                            _puuid, _psim = _phit
+                            _linked = next((g for g, p in voice_bank.puuid_map.items() if p == _puuid), None)
+                            if _linked is None:
+                                if tgt is not None and not voice_bank.has(tgt) and tgt not in voice_bank.puuid_map:
+                                    _linked = tgt
+                                else:
+                                    while voice_bank.has(fresh) or fresh in voice_bank.puuid_map:
+                                        fresh += 1
+                                    _linked = fresh
+                                    fresh += 1
+                            voice_bank.puuid_map[_linked] = _puuid
+                            final_map[lid] = _linked
+                            last_bank_end, last_bank_gid = best["end"], _linked
+                            log.info("VB_PERSIST hit local=%s -> global=%s puuid=%s sim=%.3f", lid, _linked, _puuid[:8], _psim)
+                            continue
                     # 2) Kontinuitätserbe: direkter Anschluss <12s, Block >=1s
                     gap = best["start"] - last_bank_end
                     if last_bank_gid is not None and 0 <= gap <= 12 and dur_ms >= 1000:
@@ -611,6 +739,8 @@ async def ws_endpoint(ws: WebSocket):
                     if not voice_bank.has(tgt):
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, tgt, list(samples), dur_ms, True)
                         log.info("VB enroll global=%s ok=%s total_dur=%sms best=%sms blocks=%s", tgt, ok, dur_ms, best_dur_ms, len(cand))
+                        if ok:
+                            _persist_learn(voice_bank, tgt)
                         if not ok:
                             # Enroll gescheitert (zu kurz/drift) -> kein Phantom,
                             # sondern Anschluss an letzte bestaetigte Stimme
@@ -626,6 +756,8 @@ async def ws_endpoint(ws: WebSocket):
                         final_map[lid] = fresh
                         ok = await loop.run_in_executor(_executor, voice_bank.enroll, fresh, list(samples), dur_ms, True)
                         log.info("VB fresh global=%s ok=%s total_dur=%sms blocks=%s (Fehlzuordnung von %s)", fresh, ok, dur_ms, len(cand), tgt)
+                        if ok:
+                            _persist_learn(voice_bank, fresh)
                         if not ok:
                             # Fresh ohne Voiceprint -> zurueck auf Reconciler-Ziel,
                             # kein neues Phantom im Bestand
@@ -706,7 +838,9 @@ async def ws_endpoint(ws: WebSocket):
                                 pass
                         if global_segments:
                             try:
-                                await ws.send_text(json.dumps({"type": "diarization", "segments": list(global_segments), "rolling": True}))
+                                _vprof = {str(g): p for g, p in voice_bank.puuid_map.items()}
+                                await ws.send_text(json.dumps({"type": "diarization", "segments": list(global_segments), "rolling": True, "voice_profiles": _vprof}))
+                                log.info("VB_PERSIST sent profiles=%s", len(_vprof))
                                 log.info("Diarization sent (rolling): %s segs %s", len(global_segments),
                                          [(round(g["start"],1), round(g["end"],1), g["speaker"]) for g in global_segments])
                             except RuntimeError:
