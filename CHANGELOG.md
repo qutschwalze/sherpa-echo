@@ -2,6 +2,11 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
+## Step 8a — Drift-threshold parity with handset (server)
+
+- Problem: the server drift guard (0.50) was stricter than the handset (0.35) — a late-joining voice just below 0.50 was kept as a new identity instead of being drift-merged.
+- Fix: new `drift_thr = 0.35` used only for drift queries (`identify` drift pre-check, `quick-DRIFT`); enroll/confirm thresholds stay 0.50/0.62. One variable, A/B against prior build on bank size and phantom count.
+
 ## Step 4 — Phantom fallback (server)
 
 - Problem: short audio fragments that never produced a voiceprint stayed in the speaker inventory as phantom identities, inflating the speaker count on long sessions.

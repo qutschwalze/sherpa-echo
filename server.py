@@ -297,12 +297,14 @@ def _cosine(a, b):
 
 class PySessionVoiceBank:
     # Port von SessionVoiceBank.kt: match 0.62, pending 0.50 (Server: 0.35 verwarf echte Zweitstimme sim 0.44), minEnroll/Identify 2s, Quick-Confirm 4s
+    # Step 8a: drift_thr 0.35 nur für Drift-Abfragen (Handy-Parität) – Enroll/Confirm bleiben 0.50/0.62
     def __init__(self):
         self.voiceprints = {}
         self.counts = {}
         self.pending = {}
         self.match_thr = 0.62
         self.pending_thr = 0.50
+        self.drift_thr = 0.35
         self.min_enroll_sec = 2.0
         self.min_ident_sec = 2.0
         self.quick_sec = 4.0
@@ -348,14 +350,14 @@ class PySessionVoiceBank:
         thr = self.pending_thr if best_pending else self.match_thr
         if best_id is not None and best_sim > thr:
             if best_pending:
-                # Drift-Vorprüfung: gehört zu anderer bestehender Stimme?
+                # Drift-Vorprüfung: gehört zu anderer bestehender Stimme? (Step 8a: drift_thr 0.35)
                 for gid, vp in self.voiceprints.items():
-                    if gid != best_id and _cosine(emb, vp) >= self.pending_thr:
+                    if gid != best_id and _cosine(emb, vp) >= self.drift_thr:
                         del self.pending[best_id]
                         log.info("VB_DRIFT_ABFANG pending=%s -> global=%s", best_id, gid)
                         return gid
                 for gid, pe in list(self.pending.items()):
-                    if gid != best_id and _cosine(emb, pe) >= self.pending_thr:
+                    if gid != best_id and _cosine(emb, pe) >= self.drift_thr:
                         del self.pending[best_id]
                         return gid
                 # confirm: Ø aus beiden Kontakten
@@ -396,13 +398,13 @@ class PySessionVoiceBank:
         if allow_quick and dur_ms >= int(self.quick_sec*1000):
             sims_v = {oid: round(_cosine(emb, vp), 3) for oid, vp in self.voiceprints.items() if oid != gid}
             sims_p = {oid: round(_cosine(emb, pe), 3) for oid, pe in self.pending.items() if oid != gid}
-            log.info("VB quickcheck global=%s sims_v=%s sims_p=%s thr=%.2f", gid, sims_v, sims_p, self.pending_thr)
+            log.info("VB quickcheck global=%s sims_v=%s sims_p=%s thr=%.2f drift_thr=%.2f", gid, sims_v, sims_p, self.pending_thr, self.drift_thr)
             for oid, vp in self.voiceprints.items():
-                if oid != gid and _cosine(emb, vp) >= self.pending_thr:
+                if oid != gid and _cosine(emb, vp) >= self.drift_thr:
                     log.info("VB quick-DRIFT global=%s -> %s sim=%.3f", gid, oid, _cosine(emb, vp))
                     return False
             for oid, pe in self.pending.items():
-                if oid != gid and _cosine(emb, pe) >= self.pending_thr:
+                if oid != gid and _cosine(emb, pe) >= self.drift_thr:
                     log.info("VB quick-DRIFT-pending global=%s -> %s", gid, oid)
                     return False
             old = self.pending.pop(gid)
