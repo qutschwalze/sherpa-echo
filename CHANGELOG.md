@@ -2,6 +2,11 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
+## Client v30 — Stop race fix (thin client)
+
+- Problem: the stop wait loop only checked whether the segment list was non-empty — but rolling interim results fill it continuously, so the client tore down the connection before the final answer arrived. The server then logged a disconnect instead of sending the final result (seen twice on long sessions); the save fell back to interim state.
+- Fix: protocol now distinguishes interim (`diarization_live`) from final (`diarization`) results; the client waits for the final answer or the done signal (30 s, stop re-sent at 5/12/20 s silence) and only then closes and saves. Verified on-device: final received, done received, no resend needed, clean server close.
+
 ## Client v28/v29 — Durable microphone grant (thin client)
 
 - Problem: the OS silently revoked the runtime microphone grant on sideloaded builds. Recovery was a dead end on every path: the system permission dialog dies instantly, the platform has no per-app settings page, the permission manager lists no microphone toggle, and the rationale API misreports the state — every revocation needed manual shell access.

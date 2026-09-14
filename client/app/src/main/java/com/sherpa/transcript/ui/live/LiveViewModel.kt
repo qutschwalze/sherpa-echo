@@ -430,6 +430,13 @@ class LiveViewModel : ViewModel() {
 
     /** Letzte Diarization-Segmente – für Segment-Splitting im Save-Pfad */
     private var lastDiarizationSegments: List<DiarizationSegment> = emptyList()
+    // v30: Stop-Robustheit – finale Server-Antwort (diarization/done nach
+    // stop) von Live-Zwischenständen unterscheiden. Der alte Wait-Loop sah nur
+    // lastDiarizationSegments (von diarization_live längst gefüllt) und riss
+    // die Verbindung ab, bevor das Finale eintraf (2x WS disconnect statt
+    // Diarization sent). Jetzt: warten auf Finale + Stop-Wiederholung.
+    private var finalDiarReceived = false
+    private var doneReceived = false
 
     /**
      * Bester gemergter Kandidat eines verworfenen (DROP_STALE) Laufs.
@@ -536,6 +543,7 @@ class LiveViewModel : ViewModel() {
                 recordingStartedAt = System.currentTimeMillis()
                 rawFinalSegments.clear(); assignedFinalSegments = emptyList()
                 lastDiarizationSegments = emptyList()
+                finalDiarReceived = false; doneReceived = false
                 bestAssignmentQuality = AssignmentQuality(0, 0, 0)
                 lastShownSpeakerIds.clear(); lastLiveAssignMs = 0L; lastLiveAssignSpeakers = emptySet()
                 livePartial = null; currentUtteranceStartMs = null; lastPartialText = ""; lastForcedFlushTime = 0L; lastForcedFlushText = ""
@@ -565,6 +573,12 @@ class LiveViewModel : ViewModel() {
                             is SherpaWsClient.WsEvent.Diarization -> {
                                 serverDiarSegments = ev.segments.map { DiarizationSegment(it.startSec, it.endSec, it.speaker) }
                                 lastDiarizationSegments = serverDiarSegments
+                                // v30: nur das FINALE (nach stop) beendet den Wait-Loop –
+                                // diarization_live füllt die Liste laufend, zählt nicht.
+                                if (ev.final) {
+                                    finalDiarReceived = true
+                                    Log.i(TAG, "Thin final diarization: ${serverDiarSegments.size} segs")
+                                }
                                 Log.i(TAG, "Thin diarization: ${serverDiarSegments.size} segs, speakers=${serverDiarSegments.map{it.speaker}.distinct().size}")
                                 // Phase 3 Step 2: Live-Re-Assign wie Handy, aber gedrosselt:
                                 // volle Kandidaten nur noch alle 10s ODER bei neuem Speaker (sonst
@@ -608,7 +622,10 @@ class LiveViewModel : ViewModel() {
                                     }
                                 } catch (_: Exception) {}
                             }
-                            is SherpaWsClient.WsEvent.Done -> Log.i(TAG, "WS done")
+                            is SherpaWsClient.WsEvent.Done -> {
+                                doneReceived = true
+                                Log.i(TAG, "WS done")
+                            }
                             is SherpaWsClient.WsEvent.Error -> _uiState.update { it.copy(error = ev.msg) }
                             is SherpaWsClient.WsEvent.LangDetected -> Log.i(TAG, "Thin lang detected: ${ev.lang}")
                             is SherpaWsClient.WsEvent.LangReady -> Log.i(TAG, "Thin lang mode: ${ev.mode}")
@@ -2086,14 +2103,24 @@ class LiveViewModel : ViewModel() {
             startPostProcessingIndicator()
             viewModelScope.launch {
                 captureJob?.cancel(); captureJob?.join(); captureJob = null
-                // Phase 2: auf Diarization warten (Server 1-3s für 60s Audio auf i5-7400T)
+                // v30: auf FINALE Server-Antwort warten (diarization/done nach
+                // stop) – Live-Zwischenstände zählen nicht (Race-Fix: alter Loop
+                // sah gefüllte Liste, riss sofort ab, Server verwarf mit
+                // WS disconnect). Stop bei Funkstille wiederholen (5/12/20s).
                 var waitedMs = 0
-                while (waitedMs < 30000 && lastDiarizationSegments.isEmpty() && rawFinalSegments.isNotEmpty()) {
+                var resends = 0
+                while (waitedMs < 30000 && !finalDiarReceived && !doneReceived) {
                     kotlinx.coroutines.delay(200)
                     waitedMs += 200
-                    Log.d(TAG, "Thin wait diar: ${lastDiarizationSegments.size} segs waited=${waitedMs}ms rd=${rawFinalSegments.size}")
+                    if (!finalDiarReceived && !doneReceived && waitedMs in listOf(5000, 12000, 20000)) {
+                        try {
+                            wsClient.sendStop()
+                            resends++
+                            Log.w(TAG, "Thin stop resend #$resends at ${waitedMs}ms (kein Finale)")
+                        } catch (_: Exception) {}
+                    }
                 }
-                Log.i(TAG, "Thin diar wait done: segs=${lastDiarizationSegments.size} speakers=${lastDiarizationSegments.map{it.speaker}.distinct().size} waited=${waitedMs}ms rd=${rawFinalSegments.size} rawDur=${rawFinalSegments.lastOrNull()?.let{it.endTimeMs - it.startTimeMs} ?: 0}")
+                Log.i(TAG, "Thin diar wait done: final=$finalDiarReceived done=$doneReceived resends=$resends segs=${lastDiarizationSegments.size} speakers=${lastDiarizationSegments.map{it.speaker}.distinct().size} waited=${waitedMs}ms rd=${rawFinalSegments.size} rawDur=${rawFinalSegments.lastOrNull()?.let{it.endTimeMs - it.startTimeMs} ?: 0}")
                 // letzter Partial noch als Final sichern
                 livePartial?.let { partial ->
                     if (partial.text.isNotBlank()) {

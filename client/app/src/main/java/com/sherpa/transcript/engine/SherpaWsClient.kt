@@ -47,7 +47,9 @@ class SherpaWsClient(
     sealed class WsEvent {
         data class Partial(val text: String, val tMs: Long) : WsEvent()
         data class Final(val text: String, val tMs: Long) : WsEvent()
-        data class Diarization(val segments: List<DiarSegment>) : WsEvent()
+        // v30: final=true nur für die Antwort auf stop (diarization),
+        // diarization_live (Rolling-Zwischenstand) hat final=false.
+        data class Diarization(val segments: List<DiarSegment>, val final: Boolean = false) : WsEvent()
         data object Done : WsEvent()
         data class Error(val msg: String) : WsEvent()
         // Step 5 (DE/EN): erkannte Sprache + Modus-Bestaetigung (display-only)
@@ -84,7 +86,7 @@ class SherpaWsClient(
                                     val o = arr.getJSONObject(i)
                                     list.add(DiarSegment(o.getDouble("start").toFloat(), o.getDouble("end").toFloat(), o.getInt("speaker")))
                                 }
-                                events.trySend(WsEvent.Diarization(list))
+                                events.trySend(WsEvent.Diarization(list, false))
                             } catch (e: Exception) { Log.w(tag, "diar_live parse $e") }
                         }
                         "diarization" -> {
@@ -95,7 +97,7 @@ class SherpaWsClient(
                                     val o = arr.getJSONObject(i)
                                     list.add(DiarSegment(o.getDouble("start").toFloat(), o.getDouble("end").toFloat(), o.getInt("speaker")))
                                 }
-                                pendingDiarization = list; events.trySend(WsEvent.Diarization(list))
+                                pendingDiarization = list; events.trySend(WsEvent.Diarization(list, true))
                             } catch (e: Exception) { Log.w(tag, "diar parse $e") }
                         }
                         "done" -> events.trySend(WsEvent.Done)
