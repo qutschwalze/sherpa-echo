@@ -65,7 +65,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.sherpa.transcript.BuildConfig
 import com.sherpa.transcript.domain.model.RecordingState
@@ -89,27 +88,29 @@ fun LiveScreen(
     // RECORD_AUDIO still (nach Reinstall/laufend). Jeder Startversuch prüft
     // erst und fragt neu statt in "Fehler" zu laufen; Auto-Retry bei Grant.
     val context = LocalContext.current
-    var showSettingsHint by remember { mutableStateOf(false) }
+    var showMicRetry by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            showSettingsHint = false
+            showMicRetry = false
             try { viewModel.startRecording() } catch (t: Throwable) {
                 android.util.Log.e("LiveScreen", "Retry nach Grant failed: ${t.message}", t)
             }
         } else {
-            val activity = context as? Activity
-            val permanent = activity != null &&
-                !ActivityCompat.shouldShowRequestPermissionRationale(activity, android.Manifest.permission.RECORD_AUDIO)
-            showSettingsHint = permanent
+            // v28: JEDE Ablehnung zeigt den Retry-Button – kein Settings-Weg.
+            // FireOS 6 hat keine App-Info-Seite (ActivityNotFoundException) und
+            // keine Berechtigungs-Schalter in den Einstellungen; shouldShowRequest-
+            // PermissionRationale ist auf FireOS unzuverlässig (meldet permanent,
+            // obwohl der System-Dialog bei erneutem Fragen wieder erscheint).
+            showMicRetry = true
         }
     }
     fun startWithPermission() {
         if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            showSettingsHint = false
+            showMicRetry = false
             try { viewModel.startRecording() } catch (t: Throwable) {
                 android.util.Log.e("LiveScreen", "startWithPermission failed: ${t.message}", t)
             }
@@ -134,6 +135,11 @@ fun LiveScreen(
     androidx.compose.runtime.DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                // v28: Freigabe kann jederzeit still entzogen sein – bei jedem
+                // Resume prüfen, Retry-Button ggf. zeigen bzw. verstecken.
+                showMicRetry = ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.RECORD_AUDIO,
+                ) != PackageManager.PERMISSION_GRANTED
                 if (com.sherpa.transcript.ui.live.PendingQuickStart.consume()) {
                     startWithPermission()
                 }
@@ -141,6 +147,15 @@ fun LiveScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    // v28: Beim Wiederöffnen sofort prüfen – entzogene Freigabe zeigt den
+    // Retry-Button, ohne dass erst Aufnahme getippt werden muss.
+    LaunchedEffect(lifecycleOwner) {
+        if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            showMicRetry = true
+        }
     }
 
     // Phase 8: Display-Wach-Toggle → Window-Flag an/aus (kein Stromsparmodus)
@@ -297,42 +312,21 @@ fun LiveScreen(
             }
         }
 
-        // v26: Dauerhaft abgelehnt ("Nicht mehr fragen") → Weg in die
-        // App-Einstellungen statt stiller Fehler-Schleife.
-        // v27: FireOS 6 hat keine App-Info-Seite (ActivityNotFoundException auf
-        // ACTION_APPLICATION_DETAILS_SETTINGS) → Rückfall allgemeine Einstellungen.
-        if (showSettingsHint) {
+        // v28: Ein-Tippen-Neuanfrage statt toter Einstellungen. FireOS 6 hat
+        // keine App-Info-Seite und keine Mikrofon-Schalter in den Einstellungen –
+        // der Button fragt den System-Dialog erneut an (der existiert:
+        // GrantPermissionsActivity) und startet bei Erlaubnis direkt.
+        if (showMicRetry) {
             FilledTonalButton(
                 onClick = {
-                    val pkg = context.packageName
-                    val intents = listOf(
-                        android.content.Intent(
-                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            android.net.Uri.fromParts("package", pkg, null),
-                        ),
-                        android.content.Intent(android.provider.Settings.ACTION_SETTINGS),
-                    )
-                    var opened = false
-                    for (intent in intents) {
-                        try {
-                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                            context.startActivity(intent)
-                            opened = true
-                            break
-                        } catch (t: Throwable) {
-                            android.util.Log.w("LiveScreen", "Settings-Intent ${intent.action} failed: ${t.message}")
-                        }
-                    }
-                    if (!opened) {
-                        android.util.Log.e("LiveScreen", "Kein Settings-Intent verfügbar – pm grant nötig")
-                    }
+                    permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                 },
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
                     .padding(bottom = 4.dp),
             ) {
                 Text(
-                    text = "Mikrofon in Einstellungen erlauben",
+                    text = "Mikrofon erlauben",
                     style = MaterialTheme.typography.labelLarge,
                 )
             }

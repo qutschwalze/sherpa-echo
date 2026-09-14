@@ -27,9 +27,15 @@ android {
     defaultConfig {
         applicationId = "com.sherpa.transcript"
         minSdk = 25
-        targetSdk = 35
-        versionCode = 192
-                versionName = "0.12.9-fireos6-client-v27"
+        // v29 (Fork-only): targetSdk 22 = Installzeit-Berechtigungen (Legacy-Modell).
+        // FireOS 6 entzieht Sideload-Apps Runtime-Grants (target>=23) still, der
+        // System-Dialog stirbt sofort und die Einstellungen haben keinen
+        // Mikrofon-Schalter – nach jedem Entzug war adb nötig. Mit target 22 wird
+        // RECORD_AUDIO bei der Installation erteilt, es gibt nichts zu entziehen.
+        // Main-Projekt bleibt targetSdk 35 (nur dieser Fork).
+        targetSdk = 22
+        versionCode = 194
+                versionName = "0.12.9-fireos6-client-v29"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Thin client: LAN server URL from env (SHERPA_SERVER_URL), never hardcoded.

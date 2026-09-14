@@ -2,10 +2,11 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
-## Client v26/v27 — Durable microphone permission (thin client)
+## Client v28/v29 — Durable microphone grant (thin client)
 
-- Problem: the OS silently revokes the microphone grant on sideloaded builds (after reinstall and over time). Every record attempt then ended in a dead-end error state with no recovery path.
-- Fix: every start path checks the grant first and re-requests it on demand with auto-retry after grant (`startWithPermission`); a detected permanent denial shows a one-tap shortcut into system settings (with fallback to general settings where the platform has no per-app page). Verified on-device: hint appears on permanent denial, settings open on tap, recording resumes after grant.
+- Problem: the OS silently revoked the runtime microphone grant on sideloaded builds. Recovery was a dead end on every path: the system permission dialog dies instantly, the platform has no per-app settings page, the permission manager lists no microphone toggle, and the rationale API misreports the state — every revocation needed manual shell access.
+- Fix (v28): every start path checks first and re-requests on demand; any denial shows a one-tap retry button (checked on every resume, auto-starts on grant).
+- Fix (v29, fork-only): `targetSdk 22` restores the install-time permission model — the grant is issued at install and there is nothing left to revoke. Requires one clean reinstall (the platform rejects a target downgrade over an existing install). Verified on-device: install-time `granted=true` with no manual grant, recording streams to the server. Main project stays on target 35.
 
 ## Step 8b — Persistent server voice anchors, names on device (server)
 
