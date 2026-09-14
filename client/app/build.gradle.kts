@@ -28,8 +28,8 @@ android {
         applicationId = "com.sherpa.transcript"
         minSdk = 25
         targetSdk = 35
-        versionCode = 190
-                versionName = "0.12.9-fireos6-client-v25"
+        versionCode = 192
+                versionName = "0.12.9-fireos6-client-v27"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Thin client: LAN server URL from env (SHERPA_SERVER_URL), never hardcoded.

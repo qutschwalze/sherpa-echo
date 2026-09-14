@@ -62,6 +62,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.sherpa.transcript.BuildConfig
 import com.sherpa.transcript.domain.model.RecordingState
 import com.sherpa.transcript.domain.model.TranscriptSegment
@@ -80,6 +85,38 @@ fun LiveScreen(
 
     // Phase 9c: Geteilte Sprachnachricht aus dem Share-Intent konsumieren und
     // den Import HIER starten (auf der sichtbaren Instanz – Fix für leeren Screen)
+    // v26: Mikrofon-Permission dauerhaft – FireOS entzieht Sideload-Apps
+    // RECORD_AUDIO still (nach Reinstall/laufend). Jeder Startversuch prüft
+    // erst und fragt neu statt in "Fehler" zu laufen; Auto-Retry bei Grant.
+    val context = LocalContext.current
+    var showSettingsHint by remember { mutableStateOf(false) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            showSettingsHint = false
+            try { viewModel.startRecording() } catch (t: Throwable) {
+                android.util.Log.e("LiveScreen", "Retry nach Grant failed: ${t.message}", t)
+            }
+        } else {
+            val activity = context as? Activity
+            val permanent = activity != null &&
+                !ActivityCompat.shouldShowRequestPermissionRationale(activity, android.Manifest.permission.RECORD_AUDIO)
+            showSettingsHint = permanent
+        }
+    }
+    fun startWithPermission() {
+        if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            showSettingsHint = false
+            try { viewModel.startRecording() } catch (t: Throwable) {
+                android.util.Log.e("LiveScreen", "startWithPermission failed: ${t.message}", t)
+            }
+        } else {
+            permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+        }
+    }
     LaunchedEffect(Unit) {
         com.sherpa.transcript.ui.live.PendingImport.consume()?.let { (uri, name) ->
             viewModel.importAudio(uri, name)
@@ -87,11 +124,7 @@ fun LiveScreen(
         // 0.12.9: QuickTile auf sichtbarer Instanz starten (gleicher Fix wie PendingImport 0.9.3)
         // Activity-VM != Nav-VM -> MainActivity startete auf falscher Instanz -> unsichtbar + 1.9GB.
         if (com.sherpa.transcript.ui.live.PendingQuickStart.consume()) {
-            try {
-                viewModel.startRecording()
-            } catch (t: Throwable) {
-                android.util.Log.e("LiveScreen", "QuickStart failed: ${t.message}", t)
-            }
+            startWithPermission()
         }
     }
 
@@ -102,9 +135,7 @@ fun LiveScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 if (com.sherpa.transcript.ui.live.PendingQuickStart.consume()) {
-                    try { viewModel.startRecording() } catch (t: Throwable) {
-                        android.util.Log.e("LiveScreen", "QuickStart ON_RESUME failed: ${t.message}", t)
-                    }
+                    startWithPermission()
                 }
             }
         }
@@ -113,7 +144,6 @@ fun LiveScreen(
     }
 
     // Phase 8: Display-Wach-Toggle → Window-Flag an/aus (kein Stromsparmodus)
-    val context = LocalContext.current
     LaunchedEffect(uiState.keepScreenOn) {
         val activity = context as? Activity ?: return@LaunchedEffect
         if (uiState.keepScreenOn) {
@@ -267,6 +297,47 @@ fun LiveScreen(
             }
         }
 
+        // v26: Dauerhaft abgelehnt ("Nicht mehr fragen") → Weg in die
+        // App-Einstellungen statt stiller Fehler-Schleife.
+        // v27: FireOS 6 hat keine App-Info-Seite (ActivityNotFoundException auf
+        // ACTION_APPLICATION_DETAILS_SETTINGS) → Rückfall allgemeine Einstellungen.
+        if (showSettingsHint) {
+            FilledTonalButton(
+                onClick = {
+                    val pkg = context.packageName
+                    val intents = listOf(
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.fromParts("package", pkg, null),
+                        ),
+                        android.content.Intent(android.provider.Settings.ACTION_SETTINGS),
+                    )
+                    var opened = false
+                    for (intent in intents) {
+                        try {
+                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                            opened = true
+                            break
+                        } catch (t: Throwable) {
+                            android.util.Log.w("LiveScreen", "Settings-Intent ${intent.action} failed: ${t.message}")
+                        }
+                    }
+                    if (!opened) {
+                        android.util.Log.e("LiveScreen", "Kein Settings-Intent verfügbar – pm grant nötig")
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(bottom = 4.dp),
+            ) {
+                Text(
+                    text = "Mikrofon in Einstellungen erlauben",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
+
         // ─── Scroll-Zum-Live-Ende Button (über der BottomBar) ─────
         if (!uiState.autoScrollEnabled && uiState.segments.isNotEmpty()) {
             FilledTonalButton(
@@ -311,7 +382,7 @@ fun LiveScreen(
             isModelReady = uiState.isModelReady,
             fontSize = uiState.fontSize,
             onFontSizeChanged = viewModel::onFontSizeChanged,
-            onStart = viewModel::startRecording,
+            onStart = { startWithPermission() },
             onStop = viewModel::stopRecording,
         )
 

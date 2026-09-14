@@ -2,6 +2,11 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
+## Client v26/v27 — Durable microphone permission (thin client)
+
+- Problem: the OS silently revokes the microphone grant on sideloaded builds (after reinstall and over time). Every record attempt then ended in a dead-end error state with no recovery path.
+- Fix: every start path checks the grant first and re-requests it on demand with auto-retry after grant (`startWithPermission`); a detected permanent denial shows a one-tap shortcut into system settings (with fallback to general settings where the platform has no per-app page). Verified on-device: hint appears on permanent denial, settings open on tap, recording resumes after grant.
+
 ## Step 8b — Persistent server voice anchors, names on device (server)
 
 - Problem: the session bank starts empty on every connection — recurring voices re-enroll as new identities each session, drifting the inventory.
