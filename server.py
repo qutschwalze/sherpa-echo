@@ -709,8 +709,9 @@ async def ws_endpoint(ws: WebSocket):
                             _puuid, _psim = _phit
                             _linked = next((g for g, p in voice_bank.puuid_map.items() if p == _puuid), None)
                             if _linked is None:
-                                if tgt is not None and not voice_bank.has(tgt) and tgt not in voice_bank.puuid_map:
-                                    _linked = tgt
+                                _tgt = mapping.get(lid)
+                                if _tgt is not None and not voice_bank.has(_tgt) and _tgt not in voice_bank.puuid_map:
+                                    _linked = _tgt
                                 else:
                                     while voice_bank.has(fresh) or fresh in voice_bank.puuid_map:
                                         fresh += 1
