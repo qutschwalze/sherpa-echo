@@ -34,8 +34,8 @@ android {
         // RECORD_AUDIO bei der Installation erteilt, es gibt nichts zu entziehen.
         // Main-Projekt bleibt targetSdk 35 (nur dieser Fork).
         targetSdk = 22
-        versionCode = 195
-                versionName = "0.12.9-fireos6-client-v30"
+        versionCode = 200
+                versionName = "0.12.9-fireos6-client-v35"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Thin client: LAN server URL from env (SHERPA_SERVER_URL), never hardcoded.

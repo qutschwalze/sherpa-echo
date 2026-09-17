@@ -214,21 +214,29 @@ fun LiveScreen(
                 // frei scrollen, sonst springt die Ansicht immer wieder zurück.
                 val followLive = uiState.recordingState is RecordingState.Listening ||
                     uiState.recordingState is RecordingState.Processing
-                // Auto-scroll bei neuem Segment oder Textwachstum
+                // Auto-scroll bei neuem Segment oder Textwachstum – mit Layout-
+                // Wartezeit (maxValue ist 0 bis Column gemessen ist).
                 LaunchedEffect(uiState.segments.size, uiState.segments.lastOrNull()?.text, followLive) {
                     if (followLive && uiState.segments.isNotEmpty()) {
-                        kotlinx.coroutines.delay(60)
+                        // Ein Frame warten, damit Column neu gemessen wurde
+                        kotlinx.coroutines.delay(80)
+                        // Falls maxValue noch 0, kurz nachpollin (max 5x)
+                        var tries = 0
+                        while (tries < 5 && scrollState.maxValue == 0) {
+                            kotlinx.coroutines.delay(80)
+                            tries++
+                        }
                         try { scrollState.animateScrollTo(scrollState.maxValue) } catch (_: Exception) {
                             try { scrollState.scrollTo(scrollState.maxValue) } catch (_: Exception) {}
                         }
                     }
                 }
-                // Fallback Timer nur während Aufnahme (MT8163 dropped Frames).
-                // Key auf recordingState: nach Stop startet der Effekt neu und läuft leer.
-                LaunchedEffect(uiState.recordingState) {
-                    val live = uiState.recordingState is RecordingState.Listening ||
-                        uiState.recordingState is RecordingState.Processing
-                    while (live) {
+                // Fallback-Ticker nur während Aufnahme – muss bei jedem
+                // Segments-Update neu bewerten, sonst bleibt er bei
+                // falschem Snapshot stehen (Bug: while(live) mit val live).
+                LaunchedEffect(followLive) {
+                    if (!followLive) return@LaunchedEffect
+                    while (true) {
                         kotlinx.coroutines.delay(700)
                         if (uiState.segments.isNotEmpty()) {
                             try { scrollState.scrollTo(scrollState.maxValue) } catch (_: Exception) {}

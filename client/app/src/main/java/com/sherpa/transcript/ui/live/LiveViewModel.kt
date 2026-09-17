@@ -254,10 +254,63 @@ class LiveViewModel : ViewModel() {
 
     private var captureJob: Job? = null
     private var diarizationJob: Job? = null
-    // Thin client: SHERPA_SERVER_URL aus Build-Env – kein lokales ONNX
+    // Thin client: ws:// zum LAN-Server (URL aus Build-Env) – kein lokales ONNX
     private val isThinClient: Boolean = com.sherpa.transcript.BuildConfig.SHERPA_SERVER_URL.isNotBlank()
     private val wsClient by lazy { SherpaWsClient() }
     private var wsCollectJob: Job? = null
+    private var wsReconnectJob: Job? = null
+    private var wsReconnectAttempts = 0
+    private fun scheduleWsReconnect(reason: String) {
+        if (isStopping) { Log.w(TAG, "Thin WS reconnect skip isStopping"); return }
+        val st = _uiState.value.recordingState
+        if (st !is RecordingState.Listening && st !is RecordingState.Processing) {
+            Log.w(TAG, "Thin WS reconnect skip state=$st")
+            return
+        }
+        if (wsReconnectJob?.isActive == true) { Log.w(TAG, "Thin WS reconnect skip already active"); return }
+        wsReconnectJob = viewModelScope.launch {
+            val maxAttempts = 5
+            while (wsReconnectAttempts < maxAttempts && !isStopping) {
+                val curSt = _uiState.value.recordingState
+                if (curSt !is RecordingState.Listening && curSt !is RecordingState.Processing) break
+                wsReconnectAttempts++
+                val delayMs = when (wsReconnectAttempts) { 1 -> 2000L; 2 -> 4000L; 3 -> 8000L; else -> 15000L }
+                _uiState.update { it.copy(error = "Verbindung getrennt ($reason) – verbinde neu ${wsReconnectAttempts}/$maxAttempts…") }
+                Log.w(TAG, "Thin WS reconnect #${wsReconnectAttempts}/$maxAttempts in ${delayMs}ms ($reason)")
+                kotlinx.coroutines.delay(delayMs)
+                if (isStopping) break
+                val curSt2 = _uiState.value.recordingState
+                if (curSt2 !is RecordingState.Listening && curSt2 !is RecordingState.Processing) break
+                try { wsClient.disconnect() } catch (_: Exception) {}
+                kotlinx.coroutines.delay(300)
+                try {
+                    wsClient.connect()
+                    var waited = 0
+                    while (waited < 5000 && !wsClient.isConnected.value) { kotlinx.coroutines.delay(200); waited += 200 }
+                    if (wsClient.isConnected.value) {
+                        try { wsClient.sendLangMode(useAutoLanguageDetection()) } catch (_: Exception) {}
+                        Log.i(TAG, "Thin WS reconnect ok attempt $wsReconnectAttempts")
+                        _uiState.update { it.copy(error = null) }
+                        wsReconnectAttempts = 0
+                        return@launch
+                    } else {
+                        Log.w(TAG, "Thin WS reconnect attempt $wsReconnectAttempts no open")
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Thin WS reconnect attempt $wsReconnectAttempts failed: ${e.message}")
+                }
+            }
+            if (wsReconnectAttempts >= maxAttempts) {
+                // v34: statt stummer Totenaufnahme (4+ Minuten ohne Server, Echo 10:36,
+                // Export leer) automatisch stoppen.
+                Log.e(TAG, "Thin WS reconnect exhausted – stoppe Aufnahme")
+                _uiState.update { it.copy(error = "Server nicht erreichbar – Aufnahme gestoppt.") }
+                viewModelScope.launch { stopRecording() }
+            }
+        }
+    }
     private var lastLiveAssignMs: Long = 0L
     private var lastLiveAssignSpeakers: Set<Int> = emptySet()
     private var postProcessTicker: Job? = null
@@ -548,6 +601,10 @@ class LiveViewModel : ViewModel() {
                 lastShownSpeakerIds.clear(); lastLiveAssignMs = 0L; lastLiveAssignSpeakers = emptySet()
                 livePartial = null; currentUtteranceStartMs = null; lastPartialText = ""; lastForcedFlushTime = 0L; lastForcedFlushText = ""
                 isStopping = false; isSavingFinalResult = false
+                // v35: Altzustand des Reconnect-Pfads verwerfen (laufender Job aus der
+                // Vorsession, Zähler), ausschließlich frische Events für die neue Session.
+                wsReconnectJob?.cancel(); wsReconnectJob = null; wsReconnectAttempts = 0
+                wsClient.clearEvents()
                 deriveUiSegments()
                 wsClient.connect()
                 // Step 5 (DE/EN): Opt-in aus Einstellung (DE_ONLY Standard wie Handy)
@@ -556,7 +613,7 @@ class LiveViewModel : ViewModel() {
                     // kleiner Versatz: WS muss offen sein, sonst geht die Nachricht verloren
                     viewModelScope.launch {
                         var waited = 0
-                        while (waited < 3000 && !wsClient.isConnected.value) {
+                        while (waited < 8000 && !wsClient.isConnected.value) {
                             kotlinx.coroutines.delay(200); waited += 200
                         }
                         wsClient.sendLangMode(deEn)
@@ -573,6 +630,12 @@ class LiveViewModel : ViewModel() {
                             is SherpaWsClient.WsEvent.Diarization -> {
                                 serverDiarSegments = ev.segments.map { DiarizationSegment(it.startSec, it.endSec, it.speaker) }
                                 lastDiarizationSegments = serverDiarSegments
+                                // Reconnect erfolgreich – Fehlerbanner loeschen
+                                if (wsReconnectAttempts > 0 && wsReconnectJob?.isActive != true) {
+                                    // wird vom Reconnect-Job selbst geloescht, hier nur falls Diar vorher kommt
+                                    _uiState.update { it.copy(error = null) }
+                                    wsReconnectAttempts = 0
+                                }
                                 // v30: nur das FINALE (nach stop) beendet den Wait-Loop –
                                 // diarization_live füllt die Liste laufend, zählt nicht.
                                 if (ev.final) {
@@ -626,7 +689,29 @@ class LiveViewModel : ViewModel() {
                                 doneReceived = true
                                 Log.i(TAG, "WS done")
                             }
-                            is SherpaWsClient.WsEvent.Error -> _uiState.update { it.copy(error = ev.msg) }
+                            is SherpaWsClient.WsEvent.Error -> {
+                                Log.e(TAG, "Thin WS error: ${ev.msg}")
+                                // v34: Reconnect auch im Processing-Zustand – der 10:36-Abbruch
+                                // starb genau dort: Partial da (State=Processing) -> WS tot -> kein
+                                // Reconnect -> 4+ Minuten stumme Aufnahme.
+                                val st = _uiState.value.recordingState
+                                if (!isStopping && (st is RecordingState.Listening || st is RecordingState.Processing)) {
+                                    _uiState.update { it.copy(error = "Verbindung getrennt (${ev.msg}) – verbinde neu…") }
+                                    scheduleWsReconnect(ev.msg)
+                                } else {
+                                    _uiState.update { it.copy(error = ev.msg) }
+                                }
+                            }
+                            is SherpaWsClient.WsEvent.Closed -> {
+                                Log.w(TAG, "Thin WS closed (isStopping=$isStopping final=$finalDiarReceived done=$doneReceived)")
+                                // v34: auch Processing (siehe Error-Handler) – sonst tot nach erstem Partial
+                                val st = _uiState.value.recordingState
+                                if (!isStopping && !finalDiarReceived && !doneReceived
+                                    && (st is RecordingState.Listening || st is RecordingState.Processing)) {
+                                    _uiState.update { it.copy(error = "Verbindung getrennt – verbinde neu…") }
+                                    scheduleWsReconnect("closed")
+                                }
+                            }
                             is SherpaWsClient.WsEvent.LangDetected -> Log.i(TAG, "Thin lang detected: ${ev.lang}")
                             is SherpaWsClient.WsEvent.LangReady -> Log.i(TAG, "Thin lang mode: ${ev.mode}")
                         }
@@ -2093,6 +2178,7 @@ class LiveViewModel : ViewModel() {
 
     fun stopRecording() {
         if (isThinClient) {
+            wsReconnectJob?.cancel(); wsReconnectJob = null; wsReconnectAttempts = 0
             if (isStopping) { Log.d(TAG, "stopRecording thin already stopping, ignore"); return }
             isStopping = true
             cancelRecordingNotification()
@@ -2110,6 +2196,9 @@ class LiveViewModel : ViewModel() {
                 var waitedMs = 0
                 var resends = 0
                 while (waitedMs < 30000 && !finalDiarReceived && !doneReceived) {
+                    // v34: toter Socket -> keine Antwort mehr möglich, sofort aufräumen
+                    // (vorher 30s Blindflug = die "POSTPROCESS took=30s" der Abbrüche)
+                    if (waitedMs > 1000 && !wsClient.isConnected.value) break
                     kotlinx.coroutines.delay(200)
                     waitedMs += 200
                     if (!finalDiarReceived && !doneReceived && waitedMs in listOf(5000, 12000, 20000)) {

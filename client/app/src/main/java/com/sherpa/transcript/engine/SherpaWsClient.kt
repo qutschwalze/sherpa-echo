@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
  * Thin client für Echo Show 5 (FireOS 6, API 25, MT8163).
  *
  * Statt lokaler ONNX-Inferenz (43s Init, 285MB, ANR) streamt er PCM 16kHz
- * zu SHERPA_SERVER_URL (Build-Env, LAN WebSocket zum sherpa-server).
+ * zu einem LAN-Server (ws://, Server-URL aus Build-Env, FireOS-tauglich).
  *
  * Protokoll (server.py):
  *   client -> server: binary PCM int16 LE mono 16kHz (20-100ms Chunks)
@@ -52,6 +52,7 @@ class SherpaWsClient(
         data class Diarization(val segments: List<DiarSegment>, val final: Boolean = false) : WsEvent()
         data object Done : WsEvent()
         data class Error(val msg: String) : WsEvent()
+        data object Closed : WsEvent()
         // Step 5 (DE/EN): erkannte Sprache + Modus-Bestaetigung (display-only)
         data class LangDetected(val lang: String) : WsEvent()
         data class LangReady(val mode: String) : WsEvent()
@@ -119,6 +120,7 @@ class SherpaWsClient(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(tag, "WS closed $code $reason")
                 isConnected.value = false
+                events.trySend(WsEvent.Closed)
                 ws = null
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -126,6 +128,7 @@ class SherpaWsClient(
                 lastError.value = t.message
                 isConnected.value = false
                 events.trySend(WsEvent.Error(t.message ?: "WS failure"))
+                events.trySend(WsEvent.Closed)
                 ws = null
             }
         })
@@ -149,6 +152,19 @@ class SherpaWsClient(
 
     fun sendReset() {
         ws?.send("""{"type":"reset"}""")
+    }
+
+    /**
+     * v35: Stale-Events verwerfen. Nach dem Stop bleiben Closed/Error-Events der
+     * alten Sockets im Channel; startet die nächste Session, werden sie fälschlich
+     * als Ausfall der NEUEN Verbindung interpretiert -> sofortiger Reconnect-Churn,
+     * der den frischen Socket killt (Ursache der Doppel-Connect-/Totenaufnahme).
+     * Vor dem Connect aufrufen, dann sind nur noch Events der neuen Session drin.
+     */
+    fun clearEvents() {
+        while (events.tryReceive().isSuccess) {
+            // Event verwerfen (altes Session-Ende)
+        }
     }
 
     // Step 5 (DE/EN): Opt-in direkt nach Connect (Server antwortet lang_ready)

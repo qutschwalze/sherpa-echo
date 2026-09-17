@@ -87,6 +87,11 @@ class SherpaSession:
             joiner = str(base / "joiner.onnx")
         num_threads = int(os.getenv("SHERPA_NUM_THREADS", "2"))
         # API analog zu SherpaOnnxEngine.kt: streaming zipformer
+        # Fix 2026-09-16: Endpoint-Erkennung fehlte -> is_endpoint() immer False,
+        # get_result() lieferte die kumulierte Session-Hypothese, Client-Forced-Flush
+        # vervielfachte den Text (~10x). Paritaet mit Kotlin-EndpointConfig (rule1/rule2).
+        _ep_rule1 = float(os.getenv("SHERPA_ENDPOINT_RULE1_SILENCE", "0.4"))
+        _ep_rule2 = float(os.getenv("SHERPA_ENDPOINT_RULE2_SILENCE", "0.25"))
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
             tokens=tokens,
             encoder=encoder,
@@ -97,6 +102,9 @@ class SherpaSession:
             feature_dim=80,
             decoding_method="greedy_search",
             provider="cpu",
+            enable_endpoint_detection=True,
+            rule1_min_trailing_silence=_ep_rule1,
+            rule2_min_trailing_silence=_ep_rule2,
         )
         self.stream = self.recognizer.create_stream()
         self.t_ms = 0  # kumulierte Audiozeit für Client
@@ -945,7 +953,7 @@ async def ws_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         log.info("WS disconnect")
     except Exception as e:
-        log.warning("WS error: %s", type(e).__name__)
+        log.exception("WS error: %s", type(e).__name__)
         try:
             await ws.send_text(json.dumps({"type": "error", "msg": "internal"}))
         except Exception:

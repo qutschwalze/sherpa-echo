@@ -2,6 +2,16 @@
 
 All entries are in English and deliberately free of device-, person- or meeting-specific details (no LAN addresses, hardware, names, or recording content) — the repository is public.
 
+## Client v35 + Server — WS reconnect robustness & endpoint detection parity (2026-09-17)
+
+**Server — missing endpoint detection caused transcript duplication:**
+- Problem: the streaming recognizer was created without endpoint detection, so `is_endpoint()` never fired and `get_result()` returned the entire hypothesis accumulated since connection start. Every partial/final message carried the full transcript, and the client's forced flush committed it repeatedly — exports contained ~10x the actual word count, with a single sentence repeated up to ~29 times per session.
+- Fix: `enable_endpoint_detection` with rule1 (0.4 s trailing silence) / rule2 (0.25 s), parity with the handset engine; thresholds overridable via env (`SHERPA_ENDPOINT_RULE1_SILENCE` / `SHERPA_ENDPOINT_RULE2_SILENCE`). Verified host-side and on-device: fresh exports show zero repeated n-grams.
+
+**Client v34/v35 — dead-session recovery:**
+- Problem: a WebSocket drop right after the first recognized partial left the session in the processing state, and the reconnect logic only ran in the listening state — the recording continued silently with no transcription until the user stopped it (empty exports, ~30 s stop wait). Stale socket events from the previous session could additionally trigger a reconnect cascade that killed the fresh connection.
+- Fix: reconnect now triggers in both listening and processing states; session start discards stale events and cancels leftover reconnect jobs; after 5 failed reconnect attempts the recording stops automatically with a visible error while keeping the already captured content; the stop path no longer waits 30 s when the socket is already dead. Verified on-device: a server restart mid-recording is survived (reconnect, transcription resumes); a permanent server outage ends in a clean auto-stop instead of a silent dead recording.
+
 ## Client v30 — Stop race fix (thin client)
 
 - Problem: the stop wait loop only checked whether the segment list was non-empty — but rolling interim results fill it continuously, so the client tore down the connection before the final answer arrived. The server then logged a disconnect instead of sending the final result (seen twice on long sessions); the save fell back to interim state.
